@@ -100,6 +100,13 @@ def train(args: DotMap,
             cur_loss = loss.item()
             running_loss += cur_loss
 
+            # Train DataLoader 디버깅
+            for batch in train_dataloader:
+                print(f"Batch img_A_orig shape: {batch['img_A_orig'].shape}")
+                print(f"Batch img_B_orig shape: {batch['img_B_orig'].shape}")
+                break
+
+
             # SRCC 및 PLCC 계산
             srocc, plcc = calculate_srcc_plcc(proj_A, proj_B)
             progress_bar.set_postfix(loss=running_loss / (i + 1), SRCC=srocc, PLCC=plcc)

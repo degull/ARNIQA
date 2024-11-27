@@ -110,7 +110,7 @@ class KADID10KDataset(Dataset):
         split_indices = np.load(split_file_path)[split]
         return split_indices """
 
-import pandas as pd
+""" import pandas as pd
 import re
 import numpy as np
 from PIL import Image
@@ -245,3 +245,336 @@ class KADID10KDataset(Dataset):
         split_file_path = self.root / "splits" / f"{phase}.npy"
         split_indices = np.load(split_file_path)[split]
         return split_indices
+ """
+""" 
+import pandas as pd
+import re
+import numpy as np
+from pathlib import Path
+from PIL import Image, ImageFilter
+import random
+import torch
+from torchvision import transforms
+from data.dataset_synthetic_base_iqa import SyntheticIQADataset
+from torch.utils.data import random_split, DataLoader
+from pathlib import Path
+from data.dataset_synthetic_base_iqa import SyntheticIQADataset
+import numpy as np
+from torchvision.transforms import functional as F
+
+distortion_types_mapping = {
+    1: "gaussian_blur",
+    2: "lens_blur",
+    3: "motion_blur",
+    4: "color_diffusion",
+    5: "color_shift",
+    6: "color_quantization",
+    7: "color_saturation_1",
+    8: "color_saturation_2",
+    9: "jpeg2000",
+    10: "jpeg",
+    11: "white_noise",
+    12: "white_noise_color_component",
+    13: "impulse_noise",
+    14: "multiplicative_noise",
+    15: "denoise",
+    16: "brighten",
+    17: "darken",
+    18: "mean_shift",
+    19: "jitter",
+    20: "non_eccentricity_patch",
+    21: "pixelate",
+    22: "quantization",
+    23: "color_block",
+    24: "high_sharpen",
+    25: "contrast_change"
+}
+
+
+
+
+class KADID10KDataset(SyntheticIQADataset):
+    def __init__(self, root: str, phase: str = "all", crop_size: int = 224, train_ratio=0.7, val_ratio=0.2, test_ratio=0.1, seed=42):
+        mos_type = "dmos"
+        mos_range = (1, 5)
+        is_synthetic = True
+        super().__init__(root, mos_type=mos_type, mos_range=mos_range, is_synthetic=is_synthetic, crop_size=crop_size)
+
+        # CSV 파일 로드
+        scores_csv = pd.read_csv(Path(root) / "kadid10k.csv")
+        scores_csv = scores_csv[["dist_img", "ref_img", "dmos"]]
+
+        self.images = np.array([Path(root) / "images" / img for img in scores_csv["dist_img"].values])
+        self.ref_images = np.array([Path(root) / "images" / img for img in scores_csv["ref_img"].values])
+        self.mos = np.array(scores_csv["dmos"].values.tolist())
+
+        # 왜곡 정보 파싱
+        self.distortion_types = []
+        self.distortion_levels = []
+        for img in self.images:
+            match = re.search(r'I\d+_(\d+)_(\d+)\.png$', str(img))
+            if match:
+                dist_type = distortion_types_mapping[int(match.group(1))]
+                self.distortion_types.append(dist_type)
+                self.distortion_levels.append(int(match.group(2)))
+
+        self.distortion_types = np.array(self.distortion_types)
+        self.distortion_levels = np.array(self.distortion_levels)
+
+        # 데이터셋 분리
+        dataset_length = len(self.images)
+        train_len = int(dataset_length * train_ratio)
+        val_len = int(dataset_length * val_ratio)
+        test_len = dataset_length - train_len - val_len
+
+        generator = torch.Generator().manual_seed(seed)
+        indices = torch.randperm(dataset_length, generator=generator).tolist()
+
+        self.train_indices = indices[:train_len]
+        self.val_indices = indices[train_len:train_len + val_len]
+        self.test_indices = indices[train_len + val_len:]
+
+        # Phase 처리
+        if phase == "train":
+            selected_indices = self.train_indices
+        elif phase == "val":
+            selected_indices = self.val_indices
+        elif phase == "test":
+            selected_indices = self.test_indices
+        elif phase == "all":
+            selected_indices = indices
+        else:
+            raise ValueError(f"Invalid phase: {phase}")
+
+        self.images = self.images[selected_indices]
+        self.ref_images = self.ref_images[selected_indices]
+        self.mos = self.mos[selected_indices]
+        self.distortion_types = self.distortion_types[selected_indices]
+        self.distortion_levels = self.distortion_levels[selected_indices]
+
+    def transform(self, image: Image) -> torch.Tensor:
+
+        return transforms.Compose([
+            transforms.Resize((self.crop_size, self.crop_size)),
+            transforms.ToTensor(),
+        ])(image)
+
+    def apply_distortion(self, image: Image) -> Image:
+
+        if random.random() > 0.5:
+            image = image.filter(ImageFilter.GaussianBlur(radius=2))
+        return image  # Always return a PIL.Image object
+
+    def __getitem__(self, index: int) -> dict:
+        img_A_orig = Image.open(self.images[index]).convert("RGB")
+        img_B_orig = Image.open(self.ref_images[index]).convert("RGB")
+
+        img_A_orig = self.transform(img_A_orig)
+        img_B_orig = self.transform(img_B_orig)
+
+        # Ensure `apply_distortion` outputs are correctly processed
+        crops_A = [img_A_orig] + [self.transform(self.apply_distortion(F.to_pil_image(img_A_orig))) for _ in range(3)]
+        crops_B = [img_B_orig] + [self.transform(self.apply_distortion(F.to_pil_image(img_B_orig))) for _ in range(3)]
+
+        # Stack crops
+        img_A = torch.stack(crops_A)  # Shape: [num_crops, 3, crop_size, crop_size]
+        img_B = torch.stack(crops_B)  # Shape: [num_crops, 3, crop_size, crop_size]
+
+        # Reshape to [1, num_crops, 3, crop_size, crop_size]
+        img_A = img_A.unsqueeze(0)
+        img_B = img_B.unsqueeze(0)
+
+        return {
+            "img_A_orig": img_A,
+            "img_B_orig": img_B,
+            "img_A_ds": img_A,
+            "img_B_ds": img_B,
+            "mos": self.mos[index],
+        }
+
+    def __len__(self):
+        return len(self.images)
+
+
+
+# 비율에 따라 데이터셋 분리
+def split_dataset(dataset, train_ratio=0.7, val_ratio=0.2, test_ratio=0.1, seed=42):
+    assert abs(train_ratio + val_ratio + test_ratio - 1.0) < 1e-6, "비율의 합이 1이 되어야 합니다."
+    dataset_length = len(dataset)
+    train_len = int(dataset_length * train_ratio)
+    val_len = int(dataset_length * val_ratio)
+    test_len = dataset_length - train_len - val_len  # 남은 데이터는 테스트로 할당
+
+    # 랜덤 시드 설정
+    generator = torch.Generator().manual_seed(seed)
+
+    return random_split(dataset, [train_len, val_len, test_len], generator=generator)
+
+
+if __name__ == "__main__":
+    # 데이터셋 경로
+    dataset_path = "E:/ARNIQA/ARNIQA/dataset/KADID10K"
+    
+    # 전체 데이터셋 로드
+    full_dataset = KADID10KDataset(root=dataset_path)
+
+    # 훈련, 검증, 테스트 분리
+    train_dataset, val_dataset, test_dataset = split_dataset(full_dataset, train_ratio=0.7, val_ratio=0.2, test_ratio=0.1)
+
+    print(f"훈련 데이터셋 크기: {len(train_dataset)}")
+    print(f"검증 데이터셋 크기: {len(val_dataset)}")
+    print(f"테스트 데이터셋 크기: {len(test_dataset)}")
+
+    # DataLoader 생성
+    train_dataloader = DataLoader(train_dataset, batch_size=32, shuffle=True, num_workers=4)
+    val_dataloader = DataLoader(val_dataset, batch_size=32, shuffle=False, num_workers=4)
+    test_dataloader = DataLoader(test_dataset, batch_size=32, shuffle=False, num_workers=4)
+
+    # DataLoader 확인
+    for batch in train_dataloader:
+        print(f"훈련 배치 크기: {len(batch['img_A_orig'])}")
+        break
+
+ """
+
+## 시각화할 때 사용하는 코드
+
+
+import re
+import pandas as pd
+import numpy as np
+from pathlib import Path
+from PIL import Image, ImageFilter
+from torchvision import transforms
+import torch
+import random
+import torchvision.transforms.functional as F
+
+class KADID10KDataset(torch.utils.data.Dataset):
+    def __init__(self, root: str, phase: str = "all", crop_size: int = 224, train_ratio=0.7, val_ratio=0.2, test_ratio=0.1, seed=42):
+        self.crop_size = crop_size
+
+        # CSV 파일 로드
+        scores_csv = pd.read_csv(Path(root) / "kadid10k.csv")
+        scores_csv = scores_csv[["dist_img", "ref_img", "dmos"]]
+
+        # 이미지 파일 경로 생성
+        self.images = np.array([Path(root) / "images" / img for img in scores_csv["dist_img"].values])
+        self.ref_images = np.array([Path(root) / "images" / img for img in scores_csv["ref_img"].values])
+        self.mos = np.array(scores_csv["dmos"].values.tolist())
+
+        # 왜곡 정보 파싱
+        self.distortion_types = []
+        self.distortion_levels = []
+        for img_path in self.images:
+            match = re.search(r'I\d+_(\d+)_(\d+)\.png$', str(img_path))
+            if match:
+                self.distortion_types.append(int(match.group(1)))  # 왜곡 종류
+                self.distortion_levels.append(int(match.group(2)))  # 왜곡 레벨
+            else:
+                self.distortion_types.append(-1)  # 오류 발생 시 기본값
+                self.distortion_levels.append(-1)
+
+        self.distortion_types = np.array(self.distortion_types)
+        self.distortion_levels = np.array(self.distortion_levels)
+
+        # 이미지 파일만 선택
+        valid_extensions = [".png", ".jpg", ".jpeg", ".bmp", ".tiff"]
+        valid_indices = [i for i, img_path in enumerate(self.images) if img_path.suffix.lower() in valid_extensions]
+
+        self.images = self.images[valid_indices]
+        self.ref_images = self.ref_images[valid_indices]
+        self.mos = self.mos[valid_indices]
+        self.distortion_types = self.distortion_types[valid_indices]
+        self.distortion_levels = self.distortion_levels[valid_indices]
+
+        # 데이터셋 분리
+        dataset_length = len(self.images)
+        train_len = int(dataset_length * train_ratio)
+        val_len = int(dataset_length * val_ratio)
+        test_len = dataset_length - train_len - val_len
+
+        generator = torch.Generator().manual_seed(seed)
+        indices = torch.randperm(dataset_length, generator=generator).tolist()
+
+        self.train_indices = indices[:train_len]
+        self.val_indices = indices[train_len:train_len + val_len]
+        self.test_indices = indices[train_len + val_len:]
+
+        # Phase 처리
+        if phase == "train":
+            selected_indices = self.train_indices
+        elif phase == "val":
+            selected_indices = self.val_indices
+        elif phase == "test":
+            selected_indices = self.test_indices
+        elif phase == "all":
+            selected_indices = indices
+        else:
+            raise ValueError(f"Invalid phase: {phase}")
+
+        self.images = self.images[selected_indices]
+        self.ref_images = self.ref_images[selected_indices]
+        self.mos = self.mos[selected_indices]
+        self.distortion_types = self.distortion_types[selected_indices]
+        self.distortion_levels = self.distortion_levels[selected_indices]
+
+    def transform(self, image: Image) -> torch.Tensor:
+        """
+        Transform image to tensor with specified crop size.
+        """
+        return transforms.Compose([
+            transforms.Resize((self.crop_size, self.crop_size)),
+            transforms.ToTensor(),
+        ])(image)
+
+    def apply_distortion(self, image: Image) -> Image:
+        """
+        Apply random distortion to the image and ensure the output is a PIL Image.
+        """
+        if random.random() > 0.5:
+            image = image.filter(ImageFilter.GaussianBlur(radius=2))
+        return image  # Always return a PIL.Image object
+
+    def __getitem__(self, index: int) -> dict:
+        img_A_path = self.images[index]
+        img_B_path = self.ref_images[index]
+
+        # 이미지 로드 시 예외 처리 추가
+        try:
+            img_A_orig = Image.open(img_A_path).convert("RGB")
+        except Exception as e:
+            print(f"Error loading image {img_A_path}: {e}")
+            raise
+
+        try:
+            img_B_orig = Image.open(img_B_path).convert("RGB")
+        except Exception as e:
+            print(f"Error loading image {img_B_path}: {e}")
+            raise
+
+        img_A_orig = self.transform(img_A_orig)
+        img_B_orig = self.transform(img_B_orig)
+
+        # Distortion 적용 및 크롭 생성
+        crops_A = [img_A_orig] + [self.transform(self.apply_distortion(F.to_pil_image(img_A_orig))) for _ in range(3)]
+        crops_B = [img_B_orig] + [self.transform(self.apply_distortion(F.to_pil_image(img_B_orig))) for _ in range(3)]
+
+        # Stack crops
+        img_A = torch.stack(crops_A)  # Shape: [num_crops, 3, crop_size, crop_size]
+        img_B = torch.stack(crops_B)  # Shape: [num_crops, 3, crop_size, crop_size]
+
+        # Reshape to [1, num_crops, 3, crop_size, crop_size]
+        img_A = img_A.unsqueeze(0)
+        img_B = img_B.unsqueeze(0)
+
+        return {
+            "img_A_orig": img_A,
+            "img_B_orig": img_B,
+            "mos": self.mos[index],
+            "dist_group": self.distortion_types[index],  # 왜곡 종류 추가
+            "dist_level": self.distortion_levels[index],  # 왜곡 레벨 추가
+        }
+
+    def __len__(self):
+        return len(self.images)
