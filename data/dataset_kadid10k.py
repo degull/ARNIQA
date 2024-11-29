@@ -246,7 +246,7 @@ class KADID10KDataset(Dataset):
         split_indices = np.load(split_file_path)[split]
         return split_indices
  """
-""" 
+
 import pandas as pd
 import re
 import numpy as np
@@ -435,10 +435,10 @@ if __name__ == "__main__":
         print(f"훈련 배치 크기: {len(batch['img_A_orig'])}")
         break
 
- """
+
 
 ## 시각화할 때 사용하는 코드
-
+""" 
 
 import re
 import pandas as pd
@@ -520,18 +520,14 @@ class KADID10KDataset(torch.utils.data.Dataset):
         self.distortion_levels = self.distortion_levels[selected_indices]
 
     def transform(self, image: Image) -> torch.Tensor:
-        """
-        Transform image to tensor with specified crop size.
-        """
+
         return transforms.Compose([
             transforms.Resize((self.crop_size, self.crop_size)),
             transforms.ToTensor(),
         ])(image)
 
     def apply_distortion(self, image: Image) -> Image:
-        """
-        Apply random distortion to the image and ensure the output is a PIL Image.
-        """
+
         if random.random() > 0.5:
             image = image.filter(ImageFilter.GaussianBlur(radius=2))
         return image  # Always return a PIL.Image object
@@ -578,3 +574,4 @@ class KADID10KDataset(torch.utils.data.Dataset):
 
     def __len__(self):
         return len(self.images)
+ """

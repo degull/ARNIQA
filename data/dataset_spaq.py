@@ -176,6 +176,10 @@ def center_corners_crop(image: Image, crop_size: int) -> list:
 
 import sys
 import os
+sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
+
+import sys
+import os
 from pathlib import Path
 import pandas as pd
 import numpy as np
@@ -194,25 +198,27 @@ class SPAQDataset(Dataset):
     """
     SPAQ IQA dataset with MOS in range [1, 100]. Resizes the images so that the smallest side is 512 pixels.
     """
-    def __init__(self, root: str, crop_size: int = 224, phase: str = "train"):
-        super().__init__()
+class SPAQDataset(Dataset):
+    def __init__(self, root, crop_size=224, phase="all"):
         self.root = Path(root)
         self.crop_size = crop_size
-        self.phase = phase
 
-        # Load scores from CSV
-        print("Loading scores from CSV...")
+        # CSV 파일 로드
         scores_csv = pd.read_csv(self.root / "Annotations" / "MOS and Image attribute scores.csv")
-        self.images = scores_csv["Image name"].values.tolist()
-        self.images = np.array([self.root / "TestImage" / img for img in self.images])
-        self.mos = np.array(scores_csv["MOS"].values.tolist())
+        print("CSV Columns:", scores_csv.columns)
 
-        self.target_size = 512
+        # 필요한 열 설정
+        self.images = np.array([self.root / "TestImage" / img for img in scores_csv["Image name"]])
+        self.mos = scores_csv["MOS"].values
+
+    def generate_distortion_labels(self, length):
+
+        distortion_types = ["Color distortions", "Compression", "Spatial distortions",
+                            "Noise", "Brightness change", "Blur", "Sharpness & contrast"]
+        return [distortion_types[i % len(distortion_types)] for i in range(length)]
 
     def resize_image(self, img: Image) -> Image:
-        """
-        Resize image to target size while maintaining aspect ratio.
-        """
+
         width, height = img.size
         aspect_ratio = width / height
         if width < height:
@@ -224,36 +230,26 @@ class SPAQDataset(Dataset):
 
         return img.resize((new_width, new_height), Image.BICUBIC)
 
-    def __getitem__(self, index: int) -> dict:
-        img_path = self.images[index]
-        img = Image.open(img_path).convert("RGB")
-        img = self.resize_image(img)
-
-        # Create crops
-        img_ds = resize_crop(img, crop_size=None, downscale_factor=2)
-        crops = center_corners_crop(img, crop_size=self.crop_size)
-        crops = [transforms.ToTensor()(crop) for crop in crops]
-
-        # Stack crops and normalize
-        img_A = torch.stack(crops, dim=0)  # Shape: [num_crops, 3, crop_size, crop_size]
-        crops_ds = center_corners_crop(img_ds, crop_size=self.crop_size)
-        crops_ds = [transforms.ToTensor()(crop) for crop in crops_ds]
-        img_B = torch.stack(crops_ds, dim=0)  # Distorted images
-
-        img_A = self.normalize(img_A)
-        img_B = self.normalize(img_B)
-        mos = self.mos[index]
-
-        return {
-            "img_A_orig": img_A,
-            "img_B_orig": img_B,
-            "img_A_ds": img_A,
-            "img_B_ds": img_B,
-            "mos": mos
-        }
-
     def __len__(self):
         return len(self.images)
+
+    def __getitem__(self, idx):
+        image_path = self.images[idx]
+        mos = self.mos[idx]
+
+        # 이미지 로드 및 전처리
+        image = Image.open(image_path).convert("RGB")
+        transform = transforms.Compose([
+            transforms.Resize((self.crop_size, self.crop_size)),  # 모델의 입력 크기 조정
+            transforms.ToTensor(),
+            transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])  # ImageNet 정규화
+        ])
+        image = transform(image)
+
+        return {
+            "img_A_orig": image,
+            "mos": mos
+        }
 
     def normalize(self, tensor):
         return transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])(tensor)
