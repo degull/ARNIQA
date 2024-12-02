@@ -66,7 +66,7 @@ test:
   batch_size: 16    # 배치 크기
   num_workers: 20   # 데이터 로딩에 사용할 워커 수
   num_splits: 5   # 각 데이터셋에 대해 고려할 분할 수
-  grid_search: true   # 그리드 탐색을 할지 여부
+  grid_search: false   # 그리드 탐색을 할지 여부
   alpha: 0.1  # 그리드 탐색을 사용하지 않을 때 사용할 alpha 값
   crop_size: 224  # 추론할 때 사용할 이미지 크기
   datasets:  # 테스트에 사용할 데이터셋 목록

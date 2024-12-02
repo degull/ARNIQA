@@ -30,75 +30,60 @@ ImageFile.LOAD_TRUNCATED_IMAGES = True
 synthetic_datasets = ["live", "csiq", "tid2013", "kadid10k"]
 authentic_datasets = ["flive", "spaq"]
 
+
+
 def save_checkpoint(model: nn.Module, checkpoint_path: Path, epoch: int, srocc: float) -> None:
     """모델 체크포인트 저장 함수."""
     filename = f"epoch_{epoch}_srocc_{srocc:.3f}.pth"
     torch.save(model.state_dict(), checkpoint_path / filename)
 
+
+
 def calculate_srcc_plcc(proj_A, proj_B):
     """SRCC와 PLCC 계산"""
-    # 모델 출력값을 넘파이 배열로 변환
-    proj_A = proj_A.detach().cpu().numpy()
-    proj_B = proj_B.detach().cpu().numpy()
+    # 이미 NumPy 배열인지 확인 후 변환
+    if isinstance(proj_A, torch.Tensor):
+        proj_A = proj_A.detach().cpu().numpy()
+    if isinstance(proj_B, torch.Tensor):
+        proj_B = proj_B.detach().cpu().numpy()
+
+    # 크기 확인 및 일치하지 않을 경우 예외 처리
+    if proj_A.shape != proj_B.shape:
+        raise ValueError(f"Shape mismatch: proj_A {proj_A.shape}, proj_B {proj_B.shape}")
 
     # SRCC 계산
     srocc, _ = stats.spearmanr(proj_A.flatten(), proj_B.flatten())
-
     # PLCC 계산
     plcc, _ = stats.pearsonr(proj_A.flatten(), proj_B.flatten())
-
     return srocc, plcc
 
-def train(args: DotMap,
-          model: nn.Module,
-          train_dataloader: DataLoader,
-          optimizer: torch.optim.Optimizer,
-          lr_scheduler: Optional[torch.optim.lr_scheduler.LRScheduler],
-          scaler: torch.cuda.amp.GradScaler,
-          device: torch.device) -> None:
+
+
+def train(args: DotMap, model: nn.Module, train_dataloader: DataLoader, optimizer, lr_scheduler, scaler, device):
     checkpoint_path = Path(args.checkpoint_base_path) / args.experiment_name / "pretrain"
     checkpoint_path.mkdir(parents=True, exist_ok=True)
     print("Saving checkpoints in folder: ", checkpoint_path)
 
-    config_file_path = checkpoint_path / "config.yaml"
-    dumpable_args = args.toDict()
-    config_file_path = checkpoint_path / "config.yaml"
-    with open(config_file_path, "w", encoding="utf-8") as f:
-        yaml.dump(dumpable_args, f)
-
-    start_epoch = 0 if not args.training.resume_training else args.training.start_epoch
+    best_srocc = 0
     max_epochs = args.training.epochs
-    best_srocc = 0 if not args.training.resume_training else args.best_srocc
 
-    last_srocc = 0
-    last_plcc = 0
-    best_model_filename = ""
-
-    for epoch in range(start_epoch, max_epochs):
+    for epoch in range(max_epochs):
         model.train()
         running_loss = 0.0
-        srocc_list = []
-        plcc_list = []
+        srocc_list, plcc_list = [], []
 
         progress_bar = tqdm(train_dataloader, desc=f"Epoch [{epoch + 1}/{max_epochs}]")
 
-        for i, batch in enumerate(progress_bar):
-            inputs_A_orig = batch["img_A_orig"].to(device=device, non_blocking=True)
-            inputs_A_ds = batch["img_A_ds"].to(device=device, non_blocking=True)
-            inputs_A = torch.cat((inputs_A_orig, inputs_A_ds), dim=0)
-
-            inputs_B_orig = batch["img_B_orig"].to(device=device, non_blocking=True)
-            inputs_B_ds = batch["img_B_ds"].to(device=device, non_blocking=True)
-            inputs_B = torch.cat((inputs_B_orig, inputs_B_ds), dim=0)
+        for batch in progress_bar:
+            inputs_A = batch["img_A_orig"].to(device)
+            inputs_B = batch["img_B_orig"].to(device)
 
             optimizer.zero_grad()
 
             with torch.amp.autocast(device_type='cuda'):
                 proj_A, proj_B = model(inputs_A, inputs_B)
+                print(f"proj_A shape: {proj_A.shape}, proj_B shape: {proj_B.shape}")  # 디버깅용 출력
                 loss = model.compute_loss(proj_A, proj_B)
-
-            if torch.isnan(loss):
-                raise ValueError("Loss is NaN")
 
             scaler.scale(loss).backward()
             scaler.step(optimizer)
@@ -112,48 +97,62 @@ def train(args: DotMap,
             plcc_list.append(plcc)
 
             # Progress bar 업데이트
-            progress_bar.set_postfix(loss=running_loss / (i + 1), srcc=srocc, plcc=plcc)
+            progress_bar.set_postfix(loss=running_loss / len(train_dataloader), srcc=srocc, plcc=plcc)
 
-        # 에포크 단위로 평균 SRCC, PLCC 계산
+        # 평균 SRCC 및 PLCC 출력
         avg_srocc = np.mean(srocc_list)
         avg_plcc = np.mean(plcc_list)
-        print(f"Epoch [{epoch + 1}/{max_epochs}] - Avg SRCC: {avg_srocc:.4f}, Avg PLCC: {avg_plcc:.4f}")
+        print(f"Epoch {epoch + 1}/{max_epochs}: Avg SRCC: {avg_srocc:.4f}, Avg PLCC: {avg_plcc:.4f}")
 
         # Validation
-        if epoch % args.validation.frequency == 0:
-            print("Starting validation...")
-            last_srocc, last_plcc = validate(args, model, device)
+        if (epoch + 1) % args.validation.frequency == 0:
+            validate(args, model, device)
 
-        # Save checkpoints
-        if epoch % args.checkpoint_frequency == 0:
-            print("Saving checkpoint...")
-            save_checkpoint(model, checkpoint_path, epoch, last_srocc)
-
-    print("Finished training")
+        # Checkpoint 저장
+        if (epoch + 1) % args.checkpoint_frequency == 0:
+            save_checkpoint(model, checkpoint_path, epoch, avg_srocc)
 
 
-
-def validate(args: DotMap,
-             model: nn.Module,
-             device: torch.device) -> Tuple[float, float]:
+def validate(args: DotMap, model: nn.Module, device: torch.device):
+    """검증 루프"""
     model.eval()
+    dataset = KADID10KDataset(args.data_base_path / "KADID10K", phase="val")
+    dataloader = DataLoader(dataset, batch_size=args.test.batch_size, shuffle=False, num_workers=args.test.num_workers)
 
-    srocc_all, plcc_all, _, _, _ = get_results(model=model,
-                                               data_base_path=args.data_base_path,
-                                               datasets=["kadid10k"],
-                                               num_splits=args.validation.num_splits,
-                                               phase="val",
-                                               alpha=args.validation.alpha,
-                                               grid_search=False,
-                                               crop_size=args.test.crop_size,
-                                               batch_size=args.test.batch_size,
-                                               num_workers=args.test.num_workers,
-                                               device=device)
+    all_preds, all_targets = [], []
 
-    srocc_avg = np.mean([np.median(srocc["global"]) for srocc in srocc_all.values()])
-    plcc_avg = np.mean([np.median(plcc["global"]) for plcc in plcc_all.values()])
-    return srocc_avg, plcc_avg
+    with torch.no_grad():
+        for batch in dataloader:
+            inputs_A = batch["img_A_orig"].to(device)
+            inputs_B = batch["img_B_orig"].to(device)
+            targets = batch["mos"].to(device)  # MOS 점수 (1D)
 
+            with torch.amp.autocast(device_type='cuda'):
+                proj_A, proj_B = model(inputs_A, inputs_B)
+
+                # proj_A와 proj_B를 1D 스칼라로 변환 (평균 계산)
+                preds_A = proj_A.view(inputs_A.size(0), -1, proj_A.size(-1)).mean(dim=(1, 2))  # 1D로 변환
+                preds_B = proj_B.view(inputs_B.size(0), -1, proj_B.size(-1)).mean(dim=(1, 2))  # 1D로 변환
+
+                # 두 특징의 평균값을 최종 예측으로 사용
+                preds = (preds_A + preds_B) / 2
+
+            # 결과 추가
+            all_preds.append(preds.cpu().numpy())
+            all_targets.append(targets.cpu().numpy())
+
+    # Flatten predictions and targets
+    all_preds = np.concatenate(all_preds, axis=0)  # 1D 배열로 합치기
+    all_targets = np.concatenate(all_targets, axis=0)  # 1D 배열로 합치기
+
+    # 크기 확인
+    if all_preds.shape != all_targets.shape:
+        raise ValueError(f"Mismatch between predictions and targets: {all_preds.shape} vs {all_targets.shape}")
+
+    # SRCC와 PLCC 계산
+    srocc, plcc = calculate_srcc_plcc(all_preds, all_targets)
+    print(f"Validation - SRCC: {srocc:.4f}, PLCC: {plcc:.4f}")
+    return srocc, plcc
 
 
 def get_results(model: nn.Module,
@@ -311,17 +310,16 @@ def compute_metrics(model: nn.Module,
                     batch_size: int,
                     num_workers: int,
                     device: torch.device,
-                    eval_type: str = "scratch") -> Tuple[dict, dict, Ridge, float, dict]:
+                    eval_type: str = "scratch") -> Tuple[dict, dict, Optional[Ridge], float, dict]:
     srocc_dataset = {"global": []}
     plcc_dataset = {"global": []}
     best_worst_results = {}
+    regressor = None  # 초기화
 
     # DataLoader 설정
     dataloader = DataLoader(dataset, batch_size=batch_size, shuffle=False, num_workers=num_workers, pin_memory=True)
 
     # features 및 scores 가져오기
-    # features : 이미지에서 추출된 벡터 (입력값)
-    # scores : 각 이미지의 실제 MOS
     features, scores = get_features_scores(model, dataloader, device, eval_type)
 
     # 디버깅: features와 scores의 크기 확인
@@ -361,11 +359,10 @@ def compute_metrics(model: nn.Module,
         test_scores = scores[test_indices]
 
         if len(train_features) == 0 or len(train_scores) == 0:
-            raise ValueError(f"Train features or scores are empty at split {i}. Please check data preparation.")
+            print(f"Split {i} has no valid train data. Skipping this split.")
+            continue
 
         # Ridge Regressor 훈련
-        # alpha : L2 규제 강도 -> 과적합 방지
-        # fit : 주어진 학습 데이터 -> 가중치 w 최적화
         regressor = Ridge(alpha=best_alpha).fit(train_features, train_scores)
 
         # Regressor 예측
@@ -403,6 +400,11 @@ def compute_metrics(model: nn.Module,
         plt.legend()
         plt.grid()
         plt.show()
+
+    # 모든 Split을 건너뛰었다면 regressor가 None일 수 있음
+    if regressor is None:
+        print("No valid splits processed. Please check the dataset or split configuration.")
+        return srocc_dataset, plcc_dataset, None, best_alpha, best_worst_results
 
     return srocc_dataset, plcc_dataset, regressor, best_alpha, best_worst_results
 
@@ -443,92 +445,119 @@ def get_features_scores(model, dataloader, device, eval_type):
             features = np.concatenate((feature_A.detach().cpu().numpy(), feature_B.detach().cpu().numpy()), axis=0)
             scores = mos  # MOS를 그대로 scores에 저장
 
+
     # 반환값 추가
     return features, scores
 
-
-def alpha_grid_search(dataset: Dataset,
-                      features: np.ndarray,
-                      scores: np.ndarray,
-                      num_splits: int) -> float:
+def get_split_indices(dataset_size, num_splits, split, phase):
     """
-    Perform a grid search over the validation splits to find the best alpha value for the regression based on the SROCC
-    metric. The grid search is performed over the range [1-e3, 1e3, 100].
-
-    Args:
-        dataset (Dataset): dataset to use
-        features (np.ndarray): features extracted with the model to test
-        scores (np.ndarray): ground-truth MOS scores
-        num_splits (int): number of splits to use
-
-    Returns:
-        alpha (float): best alpha value
+    데이터셋을 균등하게 나누기 위한 인덱스 생성 함수.
     """
+    if dataset_size < num_splits:
+        raise ValueError("데이터셋 크기가 분할 수보다 작습니다. 데이터를 확인하세요.")
 
-    grid_search_range = [1e-3, 1e3, 100]
-    alphas = np.geomspace(*grid_search_range, endpoint=True)
-    srocc_all = [[] for _ in range(len(alphas))]
+    indices = np.arange(dataset_size)
+    np.random.shuffle(indices)
 
-    for i in range(num_splits):
-        train_indices = dataset.get_split_indices(split=i, phase="train")
-        val_indices = dataset.get_split_indices(split=i, phase="val")
+    split_size = dataset_size // num_splits
+    remainder = dataset_size % num_splits
 
-        # for each index generate 5 indices (one for each crop)
-        train_indices = np.repeat(train_indices * 5, 5) + np.tile(np.arange(5), len(train_indices))
-        val_indices = np.repeat(val_indices * 5, 5) + np.tile(np.arange(5), len(val_indices))
+    # 각 split의 시작과 끝 인덱스를 정의
+    start = split * split_size + min(split, remainder)
+    end = start + split_size + (1 if split < remainder else 0)
 
-        train_features = features[train_indices]
-        train_scores = scores[train_indices]
+    val_indices = indices[start:end]
+    train_indices = np.setdiff1d(indices, val_indices, assume_unique=True)
 
-        val_features = features[val_indices]
-        val_scores = scores[val_indices]
-        val_scores = val_scores[::5]  # Scores are repeated for each crop, so we only keep the first one
+    if phase == "train":
+        return train_indices
+    elif phase == "val":
+        return val_indices
+    else:
+        raise ValueError("Phase must be 'train' or 'val'")
 
-        for idx, alpha in enumerate(alphas):
+
+def validate_batch(batch, required_keys):
+    """
+    배치가 유효한지 검증합니다.
+    """
+    for key in required_keys:
+        if key not in batch or batch[key] is None or len(batch[key]) == 0:
+            print(f"배치에 '{key}'가 없습니다.")
+            return False
+    return True
+
+def alpha_grid_search(dataset, features, scores, num_splits):
+    """
+    alpha의 최적값을 찾기 위한 Grid Search
+    """
+    alphas = np.geomspace(1e-3, 1e3, 100)
+    best_alpha = None
+    best_srocc = -1
+
+    for alpha in alphas:
+        srocc_list = []
+        for split in range(num_splits):
+            train_indices = get_split_indices(len(features), num_splits, split, 'train')
+            val_indices = get_split_indices(len(features), num_splits, split, 'val')
+
+            # Validation 데이터가 없는 split은 건너뜁니다.
+            if len(train_indices) == 0 or len(val_indices) == 0:
+                continue
+
+            train_features = features[train_indices]
+            train_scores = scores[train_indices]
+            val_features = features[val_indices]
+            val_scores = scores[val_indices]
+
             regressor = Ridge(alpha=alpha).fit(train_features, train_scores)
             preds = regressor.predict(val_features)
-            preds = np.mean(np.reshape(preds, (-1, 5)), 1)  # Average the predictions of the 5 crops of the same image
-            srocc_all[idx].append(stats.spearmanr(preds, val_scores)[0])
 
-    srocc_all_median = [np.median(srocc) for srocc in srocc_all]
-    srocc_all_median = np.array(srocc_all_median)
-    best_alpha_idx = np.argmax(srocc_all_median)
-    best_alpha = alphas[best_alpha_idx]
+            srocc, _ = stats.spearmanr(preds, val_scores)
+            srocc_list.append(srocc)
 
+        avg_srocc = np.mean(srocc_list)
+        if avg_srocc > best_srocc:
+            best_srocc = avg_srocc
+            best_alpha = alpha
+
+    print(f"Grid Search 완료 - Best Alpha: {best_alpha}, Best SROCC: {best_srocc}")
     return best_alpha
+
+
+def train_ridge_regressor(features, scores, alpha):
+    """
+    Ridge Regressor 학습 및 테스트
+    """
+    regressor = Ridge(alpha=alpha)
+    regressor.fit(features, scores)
+    return regressor
+
 
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument('--config', type=str, required=True, help='Configuration file')
-    parsed_args = parser.parse_args()
+    parser.add_argument("--config", type=str, required=True, help="Configuration file path")
+    args = parser.parse_args()
 
-    # YAML 파일 로드 시 인코딩 문제 방지
-    with open(parsed_args.config, encoding="utf-8") as f:
+    # Config 파일 로드
+    with open(args.config, "r", encoding="utf-8") as f:
         config = yaml.safe_load(f)
-    print("Loaded configuration:", config)
 
-    # DotMap 객체로 변환
     args = DotMap(config)
-
-    # 경로 변환
     args.data_base_path = Path(args.data_base_path)
-    args.checkpoint_base_path = Path(args.checkpoint_base_path)
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-    # 데이터셋 및 데이터로더 설정
+    # 데이터 로더 준비
     train_dataset = KADID10KDataset(args.data_base_path / "KADID10K", phase="train")
-    train_dataloader = DataLoader(train_dataset, batch_size=args.training.batch_size, shuffle=True,
-                                  num_workers=args.training.num_workers)
+    train_dataloader = DataLoader(train_dataset, batch_size=args.training.batch_size, shuffle=True, num_workers=args.training.num_workers)
 
-    # 모델, 옵티마이저, 스케줄러, 스케일러 초기화
-    model = SimCLR(encoder_params=args.model.encoder, temperature=args.model.temperature)
-    model.to(device)
+    # 모델 초기화
+    model = SimCLR(encoder_params=args.model.encoder, temperature=args.model.temperature).to(device)
 
     optimizer = torch.optim.Adam(model.parameters(), lr=args.training.learning_rate)
-    lr_scheduler = torch.optim.lr_scheduler.StepLR(optimizer, step_size=args.training.step_size,
-                                                    gamma=args.training.gamma)
+    lr_scheduler = torch.optim.lr_scheduler.StepLR(optimizer, step_size=args.training.step_size, gamma=args.training.gamma)
     scaler = torch.cuda.amp.GradScaler()
 
     # 학습 시작

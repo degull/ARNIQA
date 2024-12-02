@@ -257,17 +257,14 @@ import torch
 from torchvision import transforms
 from data.dataset_synthetic_base_iqa import SyntheticIQADataset
 from torch.utils.data import random_split, DataLoader
-from pathlib import Path
-from data.dataset_synthetic_base_iqa import SyntheticIQADataset
-import numpy as np
 from torchvision.transforms import functional as F
-
 import sys
 import os
 
 # 현재 파일의 상위 디렉토리를 PYTHONPATH에 추가
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
+# 왜곡 타입 매핑 (예시로 포함)
 distortion_types_mapping = {
     1: "gaussian_blur",
     2: "lens_blur",
@@ -296,9 +293,7 @@ distortion_types_mapping = {
     25: "contrast_change"
 }
 
-
-
-
+# 데이터셋 클래스 정의
 class KADID10KDataset(SyntheticIQADataset):
     def __init__(self, root: str, phase: str = "all", crop_size: int = 224, train_ratio=0.7, val_ratio=0.2, test_ratio=0.1, seed=42):
         mos_type = "dmos"
@@ -310,6 +305,7 @@ class KADID10KDataset(SyntheticIQADataset):
         scores_csv = pd.read_csv(Path(root) / "kadid10k.csv")
         scores_csv = scores_csv[["dist_img", "ref_img", "dmos"]]
 
+        # 이미지 경로 및 MOS 값 로드
         self.images = np.array([Path(root) / "images" / img for img in scores_csv["dist_img"].values])
         self.ref_images = np.array([Path(root) / "images" / img for img in scores_csv["ref_img"].values])
         self.mos = np.array(scores_csv["dmos"].values.tolist())
@@ -352,6 +348,7 @@ class KADID10KDataset(SyntheticIQADataset):
         else:
             raise ValueError(f"Invalid phase: {phase}")
 
+        # 선택된 인덱스에 따라 데이터 설정
         self.images = self.images[selected_indices]
         self.ref_images = self.ref_images[selected_indices]
         self.mos = self.mos[selected_indices]
@@ -359,70 +356,69 @@ class KADID10KDataset(SyntheticIQADataset):
         self.distortion_levels = self.distortion_levels[selected_indices]
 
     def transform(self, image: Image) -> torch.Tensor:
-
+        # 이미지 변환
         return transforms.Compose([
             transforms.Resize((self.crop_size, self.crop_size)),
             transforms.ToTensor(),
         ])(image)
 
     def apply_distortion(self, image: Image) -> Image:
-
+        # 왜곡 추가 (간단한 Gaussian Blur)
         if random.random() > 0.5:
             image = image.filter(ImageFilter.GaussianBlur(radius=2))
-        return image  # Always return a PIL.Image object
+        return image
 
     def __getitem__(self, index: int) -> dict:
+        # 고해상도 원본 이미지 로드
         img_A_orig = Image.open(self.images[index]).convert("RGB")
         img_B_orig = Image.open(self.ref_images[index]).convert("RGB")
 
-        img_A_orig = self.transform(img_A_orig)
+        # 고해상도 이미지 변환
+        img_A_orig = self.transform(img_A_orig)  # [3, crop_size, crop_size]
         img_B_orig = self.transform(img_B_orig)
 
-        # Ensure `apply_distortion` outputs are correctly processed
+        # 저해상도 이미지 생성 (간단한 다운스케일링 예시)
+        img_A_ds = self.transform(F.to_pil_image(F.resize(img_A_orig, (self.crop_size // 2, self.crop_size // 2))))
+        img_B_ds = self.transform(F.to_pil_image(F.resize(img_B_orig, (self.crop_size // 2, self.crop_size // 2))))
+
+        # 다중 크롭 생성
         crops_A = [img_A_orig] + [self.transform(self.apply_distortion(F.to_pil_image(img_A_orig))) for _ in range(3)]
         crops_B = [img_B_orig] + [self.transform(self.apply_distortion(F.to_pil_image(img_B_orig))) for _ in range(3)]
 
-        # Stack crops directly to [num_crops, 3, crop_size, crop_size]
-        img_A = torch.stack(crops_A)  # Shape: [num_crops, 3, crop_size, crop_size]
-        img_B = torch.stack(crops_B)  # Shape: [num_crops, 3, crop_size, crop_size]
+        # [num_crops, 3, crop_size, crop_size]로 변환
+        img_A = torch.stack(crops_A)
+        img_B = torch.stack(crops_B)
 
-        # Return without unsqueezing
         return {
-            "img_A_orig": img_A,
-            "img_B_orig": img_B,
-            "img_A_ds": img_A,  # Downsampled crops are the same in this example
-            "img_B_ds": img_B,
-            "mos": self.mos[index],
+            "img_A_orig": img_A,    # 고해상도 원본 이미지 (크롭 포함)
+            "img_B_orig": img_B,    # 고해상도 참조 이미지 (크롭 포함)
+            "img_A_ds": img_A_ds,   # 고해상도에서 다운스케일된 이미지
+            "img_B_ds": img_B_ds,   # 고해상도 참조 이미지에서 다운스케일된 이미지
+            "mos": self.mos[index], # MOS (Mean Opinion Score)
         }
-
 
     def __len__(self):
         return len(self.images)
 
-
-
-# 비율에 따라 데이터셋 분리
+# 데이터셋 분리 함수
 def split_dataset(dataset, train_ratio=0.7, val_ratio=0.2, test_ratio=0.1, seed=42):
     assert abs(train_ratio + val_ratio + test_ratio - 1.0) < 1e-6, "비율의 합이 1이 되어야 합니다."
     dataset_length = len(dataset)
     train_len = int(dataset_length * train_ratio)
     val_len = int(dataset_length * val_ratio)
-    test_len = dataset_length - train_len - val_len  # 남은 데이터는 테스트로 할당
+    test_len = dataset_length - train_len - val_len
 
-    # 랜덤 시드 설정
     generator = torch.Generator().manual_seed(seed)
-
     return random_split(dataset, [train_len, val_len, test_len], generator=generator)
 
-
+# 메인 코드 실행
 if __name__ == "__main__":
-    # 데이터셋 경로
     dataset_path = "E:/ARNIQA/ARNIQA/dataset/KADID10K"
     
-    # 전체 데이터셋 로드
+    # 데이터셋 로드
     full_dataset = KADID10KDataset(root=dataset_path)
 
-    # 훈련, 검증, 테스트 분리
+    # 데이터셋 분리
     train_dataset, val_dataset, test_dataset = split_dataset(full_dataset, train_ratio=0.7, val_ratio=0.2, test_ratio=0.1)
 
     print(f"훈련 데이터셋 크기: {len(train_dataset)}")
@@ -438,6 +434,7 @@ if __name__ == "__main__":
     for batch in train_dataloader:
         print(f"훈련 배치 크기: {batch['img_A_orig'].shape}, {batch['img_B_orig'].shape}")  # [batch_size, num_crops, 3, crop_size, crop_size]
         break
+
 
 
 
