@@ -52,6 +52,9 @@ class SimCLR(nn.Module):
         return self.nt_xent_loss(proj_q, proj_p)
 
     def nt_xent_loss(self, a: torch.Tensor, b: torch.Tensor, tau: float = 0.1) -> torch.Tensor:
+        """
+        NT-Xent Loss 구현
+        """
         a_norm = torch.norm(a, dim=1).reshape(-1, 1)
         a_cap = torch.div(a, a_norm)
         b_norm = torch.norm(b, dim=1).reshape(-1, 1)
@@ -70,10 +73,9 @@ class SimCLR(nn.Module):
         neglog_num_by_den = -torch.log(num_by_den)
         return torch.mean(neglog_num_by_den)
 
+
+""" 
 if __name__ == "__main__":
-    # 간단한 테스트 케이스
-    import torch
-    from dotmap import DotMap
 
     # 임시 encoder 파라미터 설정
     encoder_params = DotMap({
@@ -95,7 +97,7 @@ if __name__ == "__main__":
     # 결과 출력
     print(f"proj_A shape: {proj_A.shape}, proj_B shape: {proj_B.shape}")
 
-
+ """
 
 
 ## 시각화 위한 코드

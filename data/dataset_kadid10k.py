@@ -262,6 +262,12 @@ from data.dataset_synthetic_base_iqa import SyntheticIQADataset
 import numpy as np
 from torchvision.transforms import functional as F
 
+import sys
+import os
+
+# 현재 파일의 상위 디렉토리를 PYTHONPATH에 추가
+sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
+
 distortion_types_mapping = {
     1: "gaussian_blur",
     2: "lens_blur",
@@ -376,21 +382,19 @@ class KADID10KDataset(SyntheticIQADataset):
         crops_A = [img_A_orig] + [self.transform(self.apply_distortion(F.to_pil_image(img_A_orig))) for _ in range(3)]
         crops_B = [img_B_orig] + [self.transform(self.apply_distortion(F.to_pil_image(img_B_orig))) for _ in range(3)]
 
-        # Stack crops
+        # Stack crops directly to [num_crops, 3, crop_size, crop_size]
         img_A = torch.stack(crops_A)  # Shape: [num_crops, 3, crop_size, crop_size]
         img_B = torch.stack(crops_B)  # Shape: [num_crops, 3, crop_size, crop_size]
 
-        # Reshape to [1, num_crops, 3, crop_size, crop_size]
-        img_A = img_A.unsqueeze(0)
-        img_B = img_B.unsqueeze(0)
-
+        # Return without unsqueezing
         return {
             "img_A_orig": img_A,
             "img_B_orig": img_B,
-            "img_A_ds": img_A,
+            "img_A_ds": img_A,  # Downsampled crops are the same in this example
             "img_B_ds": img_B,
             "mos": self.mos[index],
         }
+
 
     def __len__(self):
         return len(self.images)
@@ -432,8 +436,9 @@ if __name__ == "__main__":
 
     # DataLoader 확인
     for batch in train_dataloader:
-        print(f"훈련 배치 크기: {len(batch['img_A_orig'])}")
+        print(f"훈련 배치 크기: {batch['img_A_orig'].shape}, {batch['img_B_orig'].shape}")  # [batch_size, num_crops, 3, crop_size, crop_size]
         break
+
 
 
 

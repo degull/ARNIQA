@@ -48,13 +48,13 @@ class ResNet(nn.Module):
         else:
             return f, g
         
-""" if __name__ == "__main__":
+if __name__ == "__main__":
     # 모델 인스턴스 생성
     model = ResNet(embedding_dim=128, pretrained=True, use_norm=True)
 
     # 포함된 레이어 확인
     print(model)
- """
+
 
 if __name__ == "__main__":
     # 모델 인스턴스 생성
