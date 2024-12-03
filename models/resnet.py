@@ -1,68 +1,29 @@
-import torch.nn as nn
-import torch.nn.functional as F
-import torchvision
-from torchvision.models import resnet50
 import torch
+import torch.nn as nn
+from torchvision.models import resnet50
 
 class ResNet(nn.Module):
-    """
-    ResNet model with a projection head.
-
-    Args:
-        embedding_dim (int): embedding dimension of the projection head
-        pretrained (bool): whether to use pretrained weights
-        use_norm (bool): whether to normalize the embeddings
-    """
-    def __init__(self, embedding_dim: int, pretrained: bool = True, use_norm: bool = True):
+    def __init__(self, embedding_dim=128, pretrained=True):
         super(ResNet, self).__init__()
-
-        self.pretrained = pretrained
-        self.use_norm = use_norm
-        self.embedding_dim = embedding_dim
-
-        if self.pretrained:
-            weights = torchvision.models.ResNet50_Weights.IMAGENET1K_V1   # V1 weights work better than V2
-        else:
-            weights = None
-        self.model = resnet50(weights=weights)
-
-        self.feat_dim = self.model.fc.in_features
-        self.model = nn.Sequential(*list(self.model.children())[:-1])
-
+        # Pretrained ResNet50 모델 로드
+        self.base_model = resnet50(pretrained=pretrained)
+        
+        # Feature 추출을 위해 FC 계층을 제거
+        self.base_model = nn.Sequential(*list(self.base_model.children())[:-1])
+        
+        # ResNet의 출력 feature 크기 확인
+        in_features = 2048  # ResNet50의 마지막 레이어 출력 크기
+        
+        # Projector 계층 정의
         self.projector = nn.Sequential(
-            nn.Linear(self.feat_dim, self.feat_dim),
+            nn.Linear(in_features, 512),
             nn.ReLU(),
-            nn.Linear(self.feat_dim, self.embedding_dim)
+            nn.Linear(512, embedding_dim)
         )
 
     def forward(self, x):
-        f = self.model(x)
-        f = f.view(-1, self.feat_dim)
-
-        if self.use_norm:
-            f = F.normalize(f, dim=1)
-
-        g = self.projector(f)
-        if self.use_norm:
-            return f, F.normalize(g, dim=1)
-        else:
-            return f, g
-        
-if __name__ == "__main__":
-    # 모델 인스턴스 생성
-    model = ResNet(embedding_dim=128, pretrained=True, use_norm=True)
-
-    # 포함된 레이어 확인
-    print(model)
-
-
-if __name__ == "__main__":
-    # 모델 인스턴스 생성
-    model = ResNet(embedding_dim=128, pretrained=True, use_norm=True)
-    
-    # 샘플 입력 생성 (배치 크기 1, 3채널, 224x224 크기의 이미지)
-    sample_input = torch.randn(1, 3, 224, 224)
-    f, g = model(sample_input)  # `forward`에서 두 출력이 반환됨
-
-    # 출력 형태 확인
-    print(f"f shape: {f.shape}, g shape: {g.shape}")  # (1, feat_dim), (1, embedding_dim)
+        # Base 모델을 통과한 features
+        features = self.base_model(x).flatten(1)  # Flattening to (batch_size, in_features)
+        # Projector 계층 통과
+        projections = self.projector(features)
+        return features, projections

@@ -1,5 +1,9 @@
 import sys
 import os
+from utils.utils import PROJECT_ROOT
+
+# PROJECT_ROOT 확인
+print(f"PROJECT_ROOT in distortions.py: {PROJECT_ROOT}")
 
 # 현재 스크립트의 디렉토리를 기준으로 절대 경로를 지정합니다.
 current_dir = os.path.dirname(os.path.abspath(__file__))
@@ -21,8 +25,8 @@ print("Utils Directory:", utils_dir)
 from utils.utils import PROJECT_ROOT
 from utils.utils_distortions import fspecial, filter2D, curves, imscatter, mapmm
 
-# PROJECT_ROOT 출력 (확인용)
-print(PROJECT_ROOT)
+# PROJECT_ROOT 경로 확인
+print(f"PROJECT_ROOT: {PROJECT_ROOT}")
 
 
 import torch
@@ -48,6 +52,23 @@ dither_cpp.argtypes = [
     ctypes.c_int,  # height
     ctypes.c_int   # nc (채널 개수)
 ]
+
+import torch
+import random
+
+def gaussian_intensity(mean=0.5, std=0.1, min_val=0.0, max_val=1.0):
+    """
+    가우시안 분포에서 샘플링한 왜곡 강도를 반환합니다.
+    """
+    intensity = random.gauss(mean, std)
+    return max(min_val, min(max_val, intensity))
+
+def apply_distortion(image: torch.Tensor, distortion_fn, intensity: float):
+    """
+    이미지에 특정 왜곡을 적용합니다.
+    """
+    return distortion_fn(image, intensity)
+
 
 # 필터 / 왜곡 함수들 정의
 def gaussian_blur(x: torch.Tensor, blur_sigma: int = 0.1) -> torch.Tensor:

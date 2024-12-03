@@ -369,32 +369,29 @@ class KADID10KDataset(SyntheticIQADataset):
         return image
 
     def __getitem__(self, index: int) -> dict:
-        # 고해상도 원본 이미지 로드
         img_A_orig = Image.open(self.images[index]).convert("RGB")
         img_B_orig = Image.open(self.ref_images[index]).convert("RGB")
 
-        # 고해상도 이미지 변환
-        img_A_orig = self.transform(img_A_orig)  # [3, crop_size, crop_size]
+        # 고해상도 변환
+        img_A_orig = self.transform(img_A_orig)
         img_B_orig = self.transform(img_B_orig)
 
-        # 저해상도 이미지 생성 (간단한 다운스케일링 예시)
-        img_A_ds = self.transform(F.to_pil_image(F.resize(img_A_orig, (self.crop_size // 2, self.crop_size // 2))))
-        img_B_ds = self.transform(F.to_pil_image(F.resize(img_B_orig, (self.crop_size // 2, self.crop_size // 2))))
+        # 다운스케일링
+        img_A_ds = F.resize(img_A_orig, (self.crop_size // 2, self.crop_size // 2))
+        img_B_ds = F.resize(img_B_orig, (self.crop_size // 2, self.crop_size // 2))
 
-        # 다중 크롭 생성
+        # 크롭 생성 (원본 + 3개의 왜곡 크롭)
         crops_A = [img_A_orig] + [self.transform(self.apply_distortion(F.to_pil_image(img_A_orig))) for _ in range(3)]
         crops_B = [img_B_orig] + [self.transform(self.apply_distortion(F.to_pil_image(img_B_orig))) for _ in range(3)]
 
-        # [num_crops, 3, crop_size, crop_size]로 변환
-        img_A = torch.stack(crops_A)
-        img_B = torch.stack(crops_B)
+        # 경음성 쌍 포함
+        hard_neg_A = torch.stack(crops_A)
+        hard_neg_B = torch.stack(crops_B)
 
         return {
-            "img_A_orig": img_A,    # 고해상도 원본 이미지 (크롭 포함)
-            "img_B_orig": img_B,    # 고해상도 참조 이미지 (크롭 포함)
-            "img_A_ds": img_A_ds,   # 고해상도에서 다운스케일된 이미지
-            "img_B_ds": img_B_ds,   # 고해상도 참조 이미지에서 다운스케일된 이미지
-            "mos": self.mos[index], # MOS (Mean Opinion Score)
+            "img_A_orig": hard_neg_A,  # [num_crops, C, H, W]
+            "img_B_orig": hard_neg_B,  # [num_crops, C, H, W]
+            "mos": self.mos[index]
         }
 
     def __len__(self):
