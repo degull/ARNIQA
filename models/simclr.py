@@ -7,15 +7,18 @@ class SimCLR(nn.Module):
         super(SimCLR, self).__init__()
         self.encoder = ResNet(embedding_dim=encoder_params.embedding_dim, pretrained=encoder_params.pretrained)
         self.temperature = temperature
-        self.linear_regressor = nn.Linear(encoder_params.embedding_dim, 1)  # 선형 회귀기 추가
+        self.linear_regressor = nn.Linear(encoder_params.embedding_dim, 1)
 
     def forward(self, img_A, img_B):
         _, proj_A = self.encoder(img_A)
         _, proj_B = self.encoder(img_B)
         return proj_A, proj_B
 
-    def compute_loss(self, proj_A, proj_B):
-        return self.nt_xent_loss(proj_A, proj_B)
+    def compute_loss(self, proj_A, proj_B, mos):
+        contrastive_loss = self.nt_xent_loss(proj_A, proj_B)
+        regression_loss = self.regression_loss(proj_A, proj_B, mos)
+        total_loss = contrastive_loss + regression_loss
+        return total_loss
 
     def nt_xent_loss(self, proj_A, proj_B):
         proj = torch.cat([proj_A, proj_B], dim=0)
@@ -23,6 +26,7 @@ class SimCLR(nn.Module):
         labels = torch.arange(proj_A.size(0)).repeat(2).to(proj.device)
         return nn.CrossEntropyLoss()(logits, labels)
 
-    def predict_quality(self, img):
-        _, proj = self.encoder(img)
-        return self.linear_regressor(proj)
+    def regression_loss(self, proj_A, proj_B, mos):
+        proj_avg = (proj_A + proj_B) / 2
+        predicted_quality = self.linear_regressor(proj_avg).squeeze()
+        return nn.MSELoss()(predicted_quality, mos)

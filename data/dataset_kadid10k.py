@@ -259,8 +259,10 @@ from data.dataset_synthetic_base_iqa import SyntheticIQADataset
 from torch.utils.data import random_split, DataLoader
 from torchvision.transforms import functional as F
 import sys
+from torch.utils.data import Dataset
+import torch.nn.functional as F
 import os
-
+from torchvision.transforms import functional as F
 # 현재 파일의 상위 디렉토리를 PYTHONPATH에 추가
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
@@ -294,12 +296,13 @@ distortion_types_mapping = {
 }
 
 # 데이터셋 클래스 정의
-class KADID10KDataset(SyntheticIQADataset):
+class KADID10KDataset(Dataset):
     def __init__(self, root: str, phase: str = "all", crop_size: int = 224, train_ratio=0.7, val_ratio=0.2, test_ratio=0.1, seed=42):
+        self.crop_size = crop_size
         mos_type = "dmos"
         mos_range = (1, 5)
         is_synthetic = True
-        super().__init__(root, mos_type=mos_type, mos_range=mos_range, is_synthetic=is_synthetic, crop_size=crop_size)
+        super().__init__()
 
         # CSV 파일 로드
         scores_csv = pd.read_csv(Path(root) / "kadid10k.csv")
@@ -357,15 +360,14 @@ class KADID10KDataset(SyntheticIQADataset):
 
     def transform(self, image: Image) -> torch.Tensor:
         # 이미지 변환
-        return transforms.Compose([
-            transforms.Resize((self.crop_size, self.crop_size)),
-            transforms.ToTensor(),
-        ])(image)
+        return transforms.Compose([transforms.Resize((self.crop_size, self.crop_size)),
+                                   transforms.ToTensor()])(image)
 
     def apply_distortion(self, image: Image) -> Image:
-        # 왜곡 추가 (간단한 Gaussian Blur)
+        # 왜곡 강도를 가우시안 분포에서 샘플링
+        gaussian_strength = np.random.normal(loc=0.5, scale=0.15)  # 평균 0.5, 표준편차 0.15
         if random.random() > 0.5:
-            image = image.filter(ImageFilter.GaussianBlur(radius=2))
+            image = image.filter(ImageFilter.GaussianBlur(radius=gaussian_strength))
         return image
 
     def __getitem__(self, index: int) -> dict:
@@ -384,15 +386,18 @@ class KADID10KDataset(SyntheticIQADataset):
         crops_A = [img_A_orig] + [self.transform(self.apply_distortion(F.to_pil_image(img_A_orig))) for _ in range(3)]
         crops_B = [img_B_orig] + [self.transform(self.apply_distortion(F.to_pil_image(img_B_orig))) for _ in range(3)]
 
-        # 경음성 쌍 포함
+        # 경음성 쌍 포함 (50% 다운샘플링 비율)
         hard_neg_A = torch.stack(crops_A)
         hard_neg_B = torch.stack(crops_B)
 
         return {
             "img_A_orig": hard_neg_A,  # [num_crops, C, H, W]
             "img_B_orig": hard_neg_B,  # [num_crops, C, H, W]
-            "mos": self.mos[index]
+            "img_A_ds": img_A_ds,  # 다운샘플링된 img_A
+            "img_B_ds": img_B_ds,  # 다운샘플링된 img_B
+            "mos": torch.tensor(self.mos[index], dtype=torch.float32)  # MOS 값
         }
+
 
     def __len__(self):
         return len(self.images)
@@ -431,7 +436,6 @@ if __name__ == "__main__":
     for batch in train_dataloader:
         print(f"훈련 배치 크기: {batch['img_A_orig'].shape}, {batch['img_B_orig'].shape}")  # [batch_size, num_crops, 3, crop_size, crop_size]
         break
-
 
 
 

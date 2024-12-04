@@ -4,7 +4,7 @@ from scipy import stats
 import argparse
 from dotmap import DotMap
 import yaml
-
+import numpy as np
 
 # 프로젝트 루트 디렉토리 정의
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -74,6 +74,16 @@ def merge_configs(config: DotMap, args: DotMap) -> DotMap:
 
 
 def save_checkpoint(model, path, epoch, srocc):
+    """
+    모델의 체크포인트를 저장합니다.
+    모델의 상태 및 epoch, SROCC 값을 포함하여 저장합니다.
+    
+    Args:
+        model (nn.Module): 저장할 모델.
+        path (Path): 체크포인트를 저장할 경로.
+        epoch (int): 현재 에폭.
+        srocc (float): SRCC 값.
+    """
     checkpoint = {
         "epoch": epoch,
         "model_state_dict": model.state_dict(),
@@ -82,12 +92,39 @@ def save_checkpoint(model, path, epoch, srocc):
     torch.save(checkpoint, path / f"epoch_{epoch}_srocc_{srocc:.4f}.pth")
 
 
-def calculate_srcc_plcc(proj_A, proj_B):
+def calculate_srcc_plcc(proj_A, proj_B, mos):
+    # proj_A, proj_B, mos 모두 CPU로 이동시키고 numpy로 변환
     proj_A = proj_A.detach().cpu().numpy()
     proj_B = proj_B.detach().cpu().numpy()
-    srocc, _ = stats.spearmanr(proj_A.flatten(), proj_B.flatten())
-    plcc, _ = stats.pearsonr(proj_A.flatten(), proj_B.flatten())
+    mos = mos.detach().cpu().numpy()  # batch["mos"]를 numpy로 변환
+
+    # proj_A와 proj_B의 크기 확인
+    print(f"proj_A shape: {proj_A.shape}")
+    print(f"proj_B shape: {proj_B.shape}")
+    
+    # mos 텐서의 크기 확인
+    print(f"mos shape before: {mos.shape}")
+
+    # mos 텐서를 [batch_size, 1]로 확장
+    batch_size = proj_A.shape[0]  # proj_A의 배치 크기
+    num_crops = proj_A.shape[1]  # proj_A의 크롭 수
+
+    # mos 텐서를 [batch_size]로 변형하고, 각 배치에 대해 동일한 값을 사용하도록 확장
+    mos = mos.flatten()  # [batch_size]로 변형
+    mos = np.repeat(mos, num_crops)  # [batch_size * num_crops]로 확장
+
+    print(f"mos shape after expand: {mos.shape}")
+    
+    # SRCC 계산
+    srocc, _ = stats.spearmanr(proj_A.flatten(), mos.flatten())
+    
+    # PLCC 계산
+    plcc, _ = stats.pearsonr(proj_B.flatten(), mos.flatten())
+
     return srocc, plcc
+
+
+
 
 
 

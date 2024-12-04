@@ -53,8 +53,7 @@ dither_cpp.argtypes = [
     ctypes.c_int   # nc (채널 개수)
 ]
 
-import torch
-import random
+
 
 def gaussian_intensity(mean=0.5, std=0.1, min_val=0.0, max_val=1.0):
     """
