@@ -11,9 +11,9 @@ checkpoint_frequency: 1  # 에폭마다 체크포인트 저장
 # Training
 training:
   epochs: 10    # 학습할 에폭 수
-  learning_rate: !!float 1e-4    # 학습률 추가
+  learning_rate: !!float 1e-3    # 학습률 추가
   batch_size: 16     # 배치 크기
-  lr: !!float 1e-4
+  lr: !!float 1e-3
   num_workers: 20   # 데이터 로딩에 사용할 워커 수
   log_images_frequency: 1000  # 로그에 이미지를 기록할 빈도 (n개의 배치마다)
   resume_training: false    # 이전 학습을 이어서 할지 여부
@@ -78,14 +78,12 @@ test:
     #- spaq
 
 # Model
-# Model
 model:
   temperature: 0.1    # NT-Xent 손실 함수에 사용할 온도 값
-  encoder_params:    # 인코더 파라미터 (수정됨)
+  encoder:    # 인코더 파라미터
     embedding_dim: 128    # 임베딩 차원 수
-    pretrained: true    # ImageNet 사전 학습 가중치를 사용할지 여부
+    pretrained: false    # ImageNet 사전 학습 가중치를 사용할지 여부
     use_norm: true    # 임베딩을 정규화할지 여부
-
 
 # Logging
 logging:

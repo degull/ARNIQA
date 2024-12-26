@@ -5,6 +5,7 @@ import argparse
 from dotmap import DotMap
 import yaml
 import numpy as np
+import torch.nn.functional as F
 
 # 프로젝트 루트 디렉토리 정의
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -92,48 +93,46 @@ def save_checkpoint(model, path, epoch, srocc):
     torch.save(checkpoint, path / f"epoch_{epoch}_srocc_{srocc:.4f}.pth")
 
 
-def calculate_srcc_plcc(proj_A, proj_B, mos):
-    # proj_A, proj_B, mos 모두 CPU로 이동시키고 numpy로 변환
-    proj_A = proj_A.detach().cpu().numpy()
-    proj_B = proj_B.detach().cpu().numpy()
-    mos = mos.detach().cpu().numpy()  # batch["mos"]를 numpy로 변환
+""" def calculate_srcc_plcc(proj_A, proj_B, mos):
+    proj_A = proj_A.view(-1, proj_A.shape[-1]).detach().cpu().numpy()  # [batch_size * num_crops, 128]
+    proj_B = proj_B.view(-1, proj_B.shape[-1]).detach().cpu().numpy()  # [batch_size * num_crops, 128]
 
-    # proj_A와 proj_B의 크기 확인
-    print(f"proj_A shape: {proj_A.shape}")
-    print(f"proj_B shape: {proj_B.shape}")
-    
-    # mos 텐서의 크기 확인
-    print(f"mos shape before: {mos.shape}")
+    batch_size = mos.size(0)
+    num_crops = proj_A.shape[0] // batch_size  # Number of crops per batch
+    mos = mos.unsqueeze(1).repeat(1, num_crops).view(-1).detach().cpu().numpy()  # [batch_size * num_crops]
 
-    # mos 텐서를 [batch_size, 1]로 확장
-    batch_size = proj_A.shape[0]  # proj_A의 배치 크기
-    num_crops = proj_A.shape[1]  # proj_A의 크롭 수
-
-    # mos 텐서를 [batch_size]로 변형하고, 각 배치에 대해 동일한 값을 사용하도록 확장
-    mos = mos.flatten()  # [batch_size]로 변형
-    mos = np.repeat(mos, num_crops)  # [batch_size * num_crops]로 확장
-
-    print(f"mos shape after expand: {mos.shape}")
-    
-    # SRCC 계산
     srocc, _ = stats.spearmanr(proj_A.flatten(), mos.flatten())
-    
-    # PLCC 계산
+
     plcc, _ = stats.pearsonr(proj_B.flatten(), mos.flatten())
 
     return srocc, plcc
+ """
 
 
-
-
+def calculate_srcc_plcc(proj_A, proj_B):
+    proj_A = proj_A.detach().cpu().numpy()
+    proj_B = proj_B.detach().cpu().numpy()
+    assert proj_A.shape == proj_B.shape, "Shape mismatch between proj_A and proj_B"
+    srocc, _ = stats.spearmanr(proj_A.flatten(), proj_B.flatten())
+    plcc, _ = stats.pearsonr(proj_A.flatten(), proj_B.flatten())
+    return srocc, plcc
 
 
 def configure_degradation_model(batch, device):
     """
-    입력 데이터를 GPU로 이동하고 모델과 동일한 장치에서 처리하도록 설정.
+    배치 데이터에서 원본 및 다운샘플링 이미지를 생성합니다.
     """
     img_A_orig = batch["img_A_orig"].to(device)
-    img_A_ds = batch["img_A_ds"].to(device)
     img_B_orig = batch["img_B_orig"].to(device)
-    img_B_ds = batch["img_B_ds"].to(device)
+
+    # 다운샘플링된 이미지 생성
+    if "img_A_ds" in batch and "img_B_ds" in batch:
+        img_A_ds = batch["img_A_ds"].to(device)
+        img_B_ds = batch["img_B_ds"].to(device)
+    else:
+        # 만약 다운샘플링된 이미지가 없으면 직접 생성
+        scale_factor = 0.5
+        img_A_ds = F.interpolate(img_A_orig, scale_factor=scale_factor, mode='bilinear', align_corners=False)
+        img_B_ds = F.interpolate(img_B_orig, scale_factor=scale_factor, mode='bilinear', align_corners=False)
+
     return img_A_orig, img_A_ds, img_B_orig, img_B_ds

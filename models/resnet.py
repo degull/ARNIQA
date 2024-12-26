@@ -1,29 +1,46 @@
-import torch
 import torch.nn as nn
+import torch.nn.functional as F
+import torchvision
 from torchvision.models import resnet50
 
+
 class ResNet(nn.Module):
-    def __init__(self, embedding_dim=128, pretrained=True):
+    def __init__(self, embedding_dim: int, pretrained: bool = True, use_norm: bool = True):
         super(ResNet, self).__init__()
-        # Pretrained ResNet50 모델 로드
-        self.base_model = resnet50(pretrained=pretrained)
-        
-        # Feature 추출을 위해 FC 계층을 제거
-        self.base_model = nn.Sequential(*list(self.base_model.children())[:-1])
-        
-        # ResNet의 출력 feature 크기 확인
-        in_features = 2048  # ResNet50의 마지막 레이어 출력 크기
-        
-        # Projector 계층 정의
+
+        self.pretrained = pretrained
+        self.use_norm = use_norm
+        self.embedding_dim = embedding_dim
+
+        if self.pretrained:
+            weights = torchvision.models.ResNet50_Weights.IMAGENET1K_V1   # V1 weights work better than V2
+        else:
+            weights = None
+        self.model = resnet50(weights=weights)
+
+        self.feat_dim = self.model.fc.in_features
+        self.model = nn.Sequential(*list(self.model.children())[:-1])
+
         self.projector = nn.Sequential(
-            nn.Linear(in_features, 512),
+            nn.Linear(self.feat_dim, self.feat_dim),
             nn.ReLU(),
-            nn.Linear(512, embedding_dim)
+            nn.Linear(self.feat_dim, self.embedding_dim)
         )
 
     def forward(self, x):
-        # Base 모델을 통과한 features
-        features = self.base_model(x).flatten(1)  # Flattening to (batch_size, in_features)
-        # Projector 계층 통과
-        projections = self.projector(features)
-        return features, projections
+        print(f"[DEBUG] ResNet input x shape: {x.shape}")
+        f = self.model(x)  # ResNet Backbone
+        print(f"[DEBUG] ResNet backbone output f shape: {f.shape}")
+        f = f.view(-1, self.feat_dim)
+        print(f"[DEBUG] ResNet flattened output f shape: {f.shape}")
+
+        if self.use_norm:
+            f = F.normalize(f, dim=1)
+            print(f"[DEBUG] ResNet normalized f shape: {f.shape}")
+
+        g = self.projector(f)
+        print(f"[DEBUG] Projector output g shape: {g.shape}")
+        if self.use_norm:
+            return f, F.normalize(g, dim=1)
+        else:
+            return f, g
