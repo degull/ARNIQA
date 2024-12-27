@@ -136,7 +136,7 @@ def get_results(model: nn.Module,
 
 
 
-def compute_metrics(model, dataloader, num_splits, phase=None, alpha=None, grid_search=False, batch_size=None, num_workers=None, device=None, eval_type="scratch"):
+""" def compute_metrics(model, dataloader, num_splits, phase=None, alpha=None, grid_search=False, batch_size=None, num_workers=None, device=None, eval_type="scratch"):
     features, scores = get_features_scores(model, dataloader, device)
 
     srocc_all, plcc_all = {"global": []}, {"global": []}
@@ -159,7 +159,39 @@ def compute_metrics(model, dataloader, num_splits, phase=None, alpha=None, grid_
         plcc_all["global"].append(plcc if not np.isnan(plcc) else 0.0)
 
     return srocc_all, plcc_all, None, None, None
+ """
 
+
+
+def compute_metrics(model, dataloader, num_splits, phase=None, alpha=None, grid_search=False,
+                    batch_size=None, num_workers=None, device=None, eval_type="scratch"):
+    features, scores = get_features_scores(model, dataloader, device)
+
+    srocc_all, plcc_all = {"global": []}, {"global": []}
+    for i in range(num_splits):
+        train_indices = np.arange(0, len(features) // 2)
+        test_indices = np.arange(len(features) // 2, len(features))
+
+        train_features = features[train_indices]
+        train_scores = scores[train_indices]
+        test_features = features[test_indices]
+        test_scores = scores[test_indices]
+
+        if len(train_features) == 0 or len(test_features) == 0:
+            srocc_all["global"].append(0.0)
+            plcc_all["global"].append(0.0)
+            continue
+
+        regressor = Ridge().fit(train_features, train_scores)
+        preds = regressor.predict(test_features)
+
+        srocc = stats.spearmanr(preds, test_scores)[0]
+        plcc = stats.pearsonr(preds, test_scores)[0]
+
+        srocc_all["global"].append(srocc if not np.isnan(srocc) else 0.0)
+        plcc_all["global"].append(plcc if not np.isnan(plcc) else 0.0)
+
+    return srocc_all, plcc_all, None, None, None
 
 
 def get_features_scores(model, dataloader, device):

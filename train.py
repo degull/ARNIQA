@@ -268,7 +268,7 @@ def train(args: DotMap,
 
     print('Finished training')
 
-def validate(args: DotMap,
+""" def validate(args: DotMap,
              model: torch.nn.Module,
              logger: Optional[Run],
              num_logging_steps: int,
@@ -300,7 +300,81 @@ def validate(args: DotMap,
                     "val_srocc_avg": srocc_avg, "val_plcc_avg": plcc_avg}, step=num_logging_steps)
 
     return srocc_avg, plcc_avg
+ """
 
+
+def validate(args: DotMap,
+             model: torch.nn.Module,
+             logger: Optional[Run],
+             num_logging_steps: int,
+             device: torch.device) -> Tuple[float, float]:
+    model.eval()
+
+    srocc_all, plcc_all, _, _, _ = get_results(
+        model=model,
+        data_base_path=args.data_base_path,
+        datasets=args.validation.datasets,
+        num_splits=args.validation.num_splits,
+        phase="val",
+        alpha=args.validation.alpha,
+        grid_search=False,
+        crop_size=args.test.crop_size,
+        batch_size=args.test.batch_size,
+        num_workers=args.test.num_workers,
+        device=device
+    )
+
+    # Compute medians, handle empty lists
+    srocc_all_median = {
+        key: (np.median(value["global"]) if len(value["global"]) > 0 else 0.0)
+        for key, value in srocc_all.items()
+    }
+    plcc_all_median = {
+        key: (np.median(value["global"]) if len(value["global"]) > 0 else 0.0)
+        for key, value in plcc_all.items()
+    }
+
+    # Compute synthetic and authentic averages, handle NaN
+    def safe_mean(values):
+        if len(values) == 0:
+            return 0.0
+        mean_value = np.nanmean(values)
+        return mean_value if not np.isnan(mean_value) else 0.0
+
+    srocc_synthetic_avg = safe_mean([
+        srocc_all_median[key] for key in srocc_all_median.keys() if key in synthetic_datasets
+    ])
+    plcc_synthetic_avg = safe_mean([
+        plcc_all_median[key] for key in plcc_all_median.keys() if key in synthetic_datasets
+    ])
+    srocc_authentic_avg = safe_mean([
+        srocc_all_median[key] for key in srocc_all_median.keys() if key in authentic_datasets
+    ])
+    plcc_authentic_avg = safe_mean([
+        plcc_all_median[key] for key in plcc_all_median.keys() if key in authentic_datasets
+    ])
+
+    # Global averages
+    srocc_avg = safe_mean(list(srocc_all_median.values()))
+    plcc_avg = safe_mean(list(plcc_all_median.values()))
+
+    if logger:
+        logger.log({
+            f"val_srocc_{key}": srocc_all_median[key] for key in srocc_all_median.keys()
+        }, step=num_logging_steps)
+        logger.log({
+            f"val_plcc_{key}": plcc_all_median[key] for key in plcc_all_median.keys()
+        }, step=num_logging_steps)
+        logger.log({
+            "val_srocc_synthetic_avg": srocc_synthetic_avg,
+            "val_plcc_synthetic_avg": plcc_synthetic_avg,
+            "val_srocc_authentic_avg": srocc_authentic_avg,
+            "val_plcc_authentic_avg": plcc_authentic_avg,
+            "val_srocc_avg": srocc_avg,
+            "val_plcc_avg": plcc_avg
+        }, step=num_logging_steps)
+
+    return srocc_avg, plcc_avg
 
 
 def train_validate_test(args: DotMap,
