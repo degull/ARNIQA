@@ -1,165 +1,348 @@
-
-import torch
-import torch.nn as nn
-from torch.utils.data import DataLoader, Dataset
-import numpy as np
-from dotmap import DotMap
-import openpyxl
-import pandas
-from openpyxl.styles import Alignment
-import pickle
-from PIL import Image
-from pathlib import Path
-from typing import List, Tuple, Optional
-from datetime import datetime
-from einops import rearrange
-from sklearn.linear_model import Ridge
-from scipy import stats
-import argparse
-from tqdm import tqdm
-from data import LIVEDataset, CSIQDataset, TID2013Dataset, KADID10KDataset, FLIVEDataset, SPAQDataset
-from utils.utils import PROJECT_ROOT, parse_command_line_args, merge_configs, parse_config
-from models.simclr import SimCLR
-# 필요한 함수들을 가져옵니다.
-from utils.utils import (
-    save_checkpoint,
-    calculate_srcc_plcc,
-    configure_degradation_model,
-    parse_args
-)
-from models.simclr import SimCLR
-from data import KADID10KDataset
-
-import torch
+""" import torch
 from torch.utils.data import DataLoader
-from utils.utils import calculate_srcc_plcc
-from models.simclr import SimCLR
+from torch.optim.lr_scheduler import LRScheduler
+import numpy as np
+from pathlib import Path
+from tqdm import tqdm
+import os
+import yaml
+import wandb
+from wandb.wandb_run import Run
+from PIL import ImageFile
+from dotmap import DotMap
+from typing import Optional, Tuple
+
+from data import KADID10KDataset
+from test import get_results, synthetic_datasets, authentic_datasets
+from utils.visualization import visualize_tsne_umap_mos
+
+ImageFile.LOAD_TRUNCATED_IMAGES = True
 
 
+def train(args: DotMap,
+          model: torch.nn.Module,
+          train_dataloader: DataLoader,
+          optimizer: torch.optim.Optimizer,
+          lr_scheduler: Optional[LRScheduler],
+          scaler: torch.cuda.amp.GradScaler,
+          logger: Optional[Run],
+          device: torch.device) -> None:
 
+    checkpoint_path = Path(args['checkpoint_base_path']) / args['experiment_name'] / "pretrain"
+    checkpoint_path.mkdir(parents=True, exist_ok=True)
+    print("Saving checkpoints in folder: ", checkpoint_path)
 
-def train(args, model, train_dataloader, val_dataloader, test_dataloader, optimizer, scheduler, scaler, device):
-    for epoch in range(args.training.epochs):
+    with open(Path(args['checkpoint_base_path']) / args['experiment_name'] / "config.yaml", "w") as f:
+        dumpable_args = args.copy()
+        for key, value in dumpable_args.items():
+            if isinstance(value, Path):
+                dumpable_args[key] = str(value)
+        yaml.dump(dumpable_args, f)
+
+    if args.training.resume_training:
+        start_epoch = args.training.start_epoch
+        max_epochs = args.training.epochs
+        best_srocc = args.best_srocc
+    else:
+        start_epoch = 0
+        max_epochs = args.training.epochs
+        best_srocc = 0
+
+    last_srocc = 0
+    last_plcc = 0
+    last_model_filename = ""
+    best_model_filename = ""
+
+    for epoch in range(start_epoch, max_epochs):
         model.train()
-        print(f"Epoch {epoch + 1}/{args.training.epochs} 시작")
-        total_loss = 0
+        running_loss = 0.0
+        progress_bar = tqdm(train_dataloader, desc=f"Epoch [{epoch + 1}/{max_epochs}]")
 
-        for batch_idx, batch in enumerate(train_dataloader):
-            img_A, img_B = batch["img_A_orig"].to(device), batch["img_B_orig"].to(device)
-            mos = batch["mos"].to(device)
+        for i, batch in enumerate(progress_bar):
+            num_logging_steps = i * args.training.batch_size + len(train_dataloader) * args.training.batch_size * epoch
+
+            inputs_A_orig = batch["img_A_orig"].to(device=device, non_blocking=True)
+            inputs_A_ds = batch["img_A_ds"].to(device=device, non_blocking=True)
+            if inputs_A_orig.shape[2:] != inputs_A_ds.shape[2:]:
+                inputs_A_ds = torch.nn.functional.interpolate(inputs_A_ds, size=inputs_A_orig.shape[2:], mode="bilinear", align_corners=False)
+            inputs_A = torch.cat((inputs_A_orig, inputs_A_ds), dim=0)
+
+            inputs_B_orig = batch["img_B_orig"].to(device=device, non_blocking=True)
+            inputs_B_ds = batch["img_B_ds"].to(device=device, non_blocking=True)
+            if inputs_B_orig.shape[2:] != inputs_B_ds.shape[2:]:
+                inputs_B_ds = torch.nn.functional.interpolate(inputs_B_ds, size=inputs_B_orig.shape[2:], mode="bilinear", align_corners=False)
+            inputs_B = torch.cat((inputs_B_orig, inputs_B_ds), dim=0)
 
             optimizer.zero_grad()
 
             with torch.cuda.amp.autocast():
-                proj_A, proj_B = model(img_A, img_B)
-                loss = model.compute_loss(proj_A, proj_B, mos)
+                loss = model(inputs_A, inputs_B)
+
+            if torch.isnan(loss):
+                raise ValueError("Loss is NaN")
 
             scaler.scale(loss).backward()
             scaler.step(optimizer)
             scaler.update()
 
-            total_loss += loss.item()
+            if lr_scheduler and lr_scheduler.__class__.__name__ == "CosineAnnealingWarmRestarts":
+                lr_scheduler.step(epoch + i / len(train_dataloader))
 
-        print(f"Train Results - Epoch {epoch + 1}: Loss = {total_loss / len(train_dataloader):.4f}")
+            running_loss += loss.item()
+            progress_bar.set_postfix(loss=running_loss / (i + 1), SROCC=last_srocc, PLCC=last_plcc)
 
-        # Validation
-        validate(args, model, val_dataloader, device)
+            if logger:
+                logger.log({"loss": loss.item(), "lr": optimizer.param_groups[0]["lr"]}, step=num_logging_steps)
 
-    # Test
-    test(args, model, test_dataloader, device)
+        if lr_scheduler and lr_scheduler.__class__.__name__ != "CosineAnnealingWarmRestarts":
+            lr_scheduler.step()
+
+        if epoch % args.validation.frequency == 0:
+            print("Starting validation...")
+            last_srocc, last_plcc = validate(args, model, logger, num_logging_steps, device)
+            print(f"Validation Results - SROCC: {last_srocc:.4f}, PLCC: {last_plcc:.4f}")  # 추가된 출력 코드
+
+            if args.validation.visualize and logger:
+                kadid10k_val = KADID10KDataset(args.data_base_path / "KADID10K", phase="val")
+                val_dataloader = DataLoader(kadid10k_val, batch_size=args.test.batch_size, shuffle=False,
+                                            num_workers=args.test.num_workers)
+                figures = visualize_tsne_umap_mos(model, val_dataloader,
+                                                  tsne_args=args.validation.visualization.tsne,
+                                                  umap_args=args.validation.visualization.umap,
+                                                  device=device)
+                logger.log(figures, step=num_logging_steps)
+
+        print("Saving checkpoint")
+
+        if last_srocc > best_srocc:
+            best_srocc = last_srocc
+            best_plcc = last_plcc
+            args.best_srocc = best_srocc
+            args.best_plcc = best_plcc
+            if best_model_filename:
+                os.remove(checkpoint_path / best_model_filename)
+            best_model_filename = f"best_epoch_{epoch}_srocc_{best_srocc:.3f}_plcc_{best_plcc:.3f}.pth"
+            torch.save(model.state_dict(), checkpoint_path / best_model_filename)
+
+        if last_model_filename:
+            os.remove(checkpoint_path / last_model_filename)
+        last_model_filename = f"last_epoch_{epoch}_srocc_{last_srocc:.3f}_plcc_{last_plcc:.3f}.pth"
+        torch.save({"model_state_dict": model.state_dict(),
+                    "optimizer_state_dict": optimizer.state_dict(),
+                    "scaler_state_dict": scaler.state_dict(),
+                    "epoch": epoch,
+                    "config": args,
+                    }, checkpoint_path / last_model_filename)
+
+    print('Finished training')
 
 
-
-def validate(args, model, val_dataloader, device):
+def validate(args: DotMap,
+             model: torch.nn.Module,
+             logger: Optional[Run],
+             num_logging_steps: int,
+             device: torch.device) -> Tuple[float, float]:
     model.eval()
-    srcc_total, plcc_total = 0, 0
-    with torch.no_grad():
-        for batch_idx, batch in enumerate(val_dataloader):
-            img_A, img_B = batch["img_A_orig"].to(device), batch["img_B_orig"].to(device)
-            mos = batch["mos"].to(device)
 
-            if img_A.shape[1] != 3:
-                img_A = img_A[:, :3, :, :]
-            if img_B.shape[1] != 3:
-                img_B = img_B[:, :3, :, :]
+    srocc_all, plcc_all, _, _, _ = get_results(model=model, data_base_path=args.data_base_path,
+                                               datasets=args.validation.datasets, num_splits=args.validation.num_splits,
+                                               phase="val", alpha=args.validation.alpha, grid_search=False,
+                                               crop_size=args.test.crop_size, batch_size=args.test.batch_size,
+                                               num_workers=args.test.num_workers, device=device)
 
-            proj_A, proj_B = model(img_A, img_B)
-            srcc, plcc = calculate_srcc_plcc(proj_A, proj_B)
-            srcc_total += srcc
-            plcc_total += plcc
+    # Compute the median for each list in srocc_all and plcc_all
+    srocc_all_median = {key: np.median(value["global"]) for key, value in srocc_all.items()}
+    plcc_all_median = {key: np.median(value["global"]) for key, value in plcc_all.items()}
 
-    avg_srcc = srcc_total / len(val_dataloader)
-    avg_plcc = plcc_total / len(val_dataloader)
-    print(f"Validation Results - Average SRCC: {avg_srcc:.4f}, Average PLCC: {avg_plcc:.4f}")
+    # Compute the synthetic and authentic averages
+    srocc_synthetic_avg = np.mean(
+        [srocc_all_median[key] for key in srocc_all_median.keys() if key in synthetic_datasets])
+    plcc_synthetic_avg = np.mean([plcc_all_median[key] for key in plcc_all_median.keys() if key in synthetic_datasets])
+    srocc_authentic_avg = np.mean(
+        [srocc_all_median[key] for key in srocc_all_median.keys() if key in authentic_datasets])
+    plcc_authentic_avg = np.mean([plcc_all_median[key] for key in plcc_all_median.keys() if key in authentic_datasets])
+
+    # Compute the global average
+    srocc_avg = np.mean(list(srocc_all_median.values()))
+    plcc_avg = np.mean(list(plcc_all_median.values()))
+
+    if logger:
+        logger.log({f"val_srocc_{key}": srocc_all_median[key] for key in srocc_all_median.keys()}, step=num_logging_steps)
+        logger.log({f"val_plcc_{key}": plcc_all_median[key] for key in plcc_all_median.keys()}, step=num_logging_steps)
+        logger.log({"val_srocc_synthetic_avg": srocc_synthetic_avg, "val_plcc_synthetic_avg": plcc_synthetic_avg,
+                    "val_srocc_authentic_avg": srocc_authentic_avg, "val_plcc_authentic_avg": plcc_authentic_avg,
+                    "val_srocc_avg": srocc_avg, "val_plcc_avg": plcc_avg}, step=num_logging_steps)
+        
+
+    last_srocc, last_plcc = validate(args, model, logger, num_logging_steps, device)
+    print(f"Validation Results - SROCC: {last_srocc}, PLCC: {last_plcc}")
+
+    return srocc_avg, plcc_avg
+ """
+
+import torch
+from torch.utils.data import DataLoader
+from torch.optim.lr_scheduler import LRScheduler
+import numpy as np
+from pathlib import Path
+from tqdm import tqdm
+import os
+import yaml
+import wandb
+from wandb.wandb_run import Run
+from PIL import ImageFile
+from dotmap import DotMap
+from typing import Optional, Tuple
+
+from data import KADID10KDataset
+from test import get_results, synthetic_datasets, authentic_datasets
+from utils.visualization import visualize_tsne_umap_mos
+
+ImageFile.LOAD_TRUNCATED_IMAGES = True
 
 
-def test(args, model, test_dataloader, device):
+def train(args: DotMap,
+          model: torch.nn.Module,
+          train_dataloader: DataLoader,
+          optimizer: torch.optim.Optimizer,
+          lr_scheduler: Optional[LRScheduler],
+          scaler: torch.cuda.amp.GradScaler,
+          logger: Optional[Run],
+          device: torch.device) -> None:
+
+    checkpoint_path = Path(args['checkpoint_base_path']) / args['experiment_name'] / "pretrain"
+    checkpoint_path.mkdir(parents=True, exist_ok=True)
+    print("Saving checkpoints in folder: ", checkpoint_path)
+
+    if args.training.resume_training:
+        start_epoch = args.training.start_epoch
+        max_epochs = args.training.epochs
+        best_srocc = args.best_srocc
+    else:
+        start_epoch = 0
+        max_epochs = args.training.epochs
+        best_srocc = 0
+
+    last_srocc, last_plcc = 0, 0
+    num_logging_steps = 0  # Initialize logging steps
+
+    for epoch in range(start_epoch, max_epochs):
+        model.train()
+        running_loss = 0.0
+        progress_bar = tqdm(train_dataloader, desc=f"Epoch [{epoch + 1}/{max_epochs}]")
+
+        for i, batch in enumerate(progress_bar):
+            optimizer.zero_grad()
+
+            # Flatten num_crops into batch_size dimension
+            inputs_A = batch["img_A_orig"].to(device).view(-1, *batch["img_A_orig"].shape[2:])
+            inputs_B = batch["img_B_orig"].to(device).view(-1, *batch["img_B_orig"].shape[2:])
+
+            with torch.amp.autocast(device_type="cuda"):
+                loss = model(inputs_A, inputs_B)
+
+            if torch.isnan(loss):
+                raise ValueError("Loss is NaN")
+
+            scaler.scale(loss).backward()
+            scaler.step(optimizer)
+            scaler.update()
+
+            if lr_scheduler and lr_scheduler.__class__.__name__ == "CosineAnnealingWarmRestarts":
+                lr_scheduler.step(epoch + i / len(train_dataloader))
+
+            running_loss += loss.item()
+            progress_bar.set_postfix(loss=running_loss / (i + 1), SROCC=last_srocc, PLCC=last_plcc)
+
+            if logger:
+                logger.log({"loss": loss.item()}, step=num_logging_steps)
+                num_logging_steps += 1  # Increment logging steps
+
+        if lr_scheduler and lr_scheduler.__class__.__name__ != "CosineAnnealingWarmRestarts":
+            lr_scheduler.step()
+
+        if epoch % args.validation.frequency == 0:
+            print("Validating...")
+            last_srocc, last_plcc = validate(args, model, logger, num_logging_steps, device)
+            print(f"Validation Results - SROCC: {last_srocc:.4f}, PLCC: {last_plcc:.4f}")
+
+    print('Finished training')
+
+def validate(args: DotMap,
+             model: torch.nn.Module,
+             logger: Optional[Run],
+             num_logging_steps: int,
+             device: torch.device) -> Tuple[float, float]:
     model.eval()
-    srcc_total, plcc_total = 0, 0
-    with torch.no_grad():
-        for batch in test_dataloader:
-            img_A, img_B = batch["img_A_orig"].to(device), batch["img_B_orig"].to(device)
-            mos = batch["mos"].to(device)
-            proj_A, proj_B = model(img_A, img_B)
-            srcc, plcc = calculate_srcc_plcc(proj_A, proj_B)
-            srcc_total += srcc
-            plcc_total += plcc
 
-    print(f"Test Results: SRCC = {srcc_total / len(test_dataloader):.4f}, PLCC = {plcc_total / len(test_dataloader):.4f}")
+    srocc_all, plcc_all, _, _, _ = get_results(model=model, data_base_path=args.data_base_path,
+                                               datasets=args.validation.datasets, num_splits=args.validation.num_splits,
+                                               phase="val", alpha=args.validation.alpha, grid_search=False,
+                                               crop_size=args.test.crop_size, batch_size=args.test.batch_size,
+                                               num_workers=args.test.num_workers, device=device)
+
+    srocc_all_median = {key: np.median(value["global"]) for key, value in srocc_all.items()}
+    plcc_all_median = {key: np.median(value["global"]) for key, value in plcc_all.items()}
+
+    srocc_synthetic_avg = np.mean([srocc_all_median[key] for key in srocc_all_median.keys() if key in synthetic_datasets])
+    plcc_synthetic_avg = np.mean([plcc_all_median[key] for key in plcc_all_median.keys() if key in synthetic_datasets])
+    srocc_authentic_avg = np.mean([srocc_all_median[key] for key in srocc_all_median.keys() if key in authentic_datasets])
+    plcc_authentic_avg = np.mean([plcc_all_median[key] for key in plcc_all_median.keys() if key in authentic_datasets])
+
+    srocc_avg = np.mean(list(srocc_all_median.values()))
+    plcc_avg = np.mean(list(plcc_all_median.values()))
+
+    if logger:
+        logger.log({f"val_srocc_{key}": srocc_all_median[key] for key in srocc_all_median.keys()}, step=num_logging_steps)
+        logger.log({f"val_plcc_{key}": plcc_all_median[key] for key in plcc_all_median.keys()}, step=num_logging_steps)
+        logger.log({"val_srocc_synthetic_avg": srocc_synthetic_avg, "val_plcc_synthetic_avg": plcc_synthetic_avg,
+                    "val_srocc_authentic_avg": srocc_authentic_avg, "val_plcc_authentic_avg": plcc_authentic_avg,
+                    "val_srocc_avg": srocc_avg, "val_plcc_avg": plcc_avg}, step=num_logging_steps)
+
+    return srocc_avg, plcc_avg
 
 
-""" if __name__ == "__main__":
-    from utils.utils import parse_args
-    args = parse_args()
 
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+def train_validate_test(args: DotMap,
+                        model: torch.nn.Module,
+                        device: torch.device) -> None:
+    datasets = {
+        "train": ["KADID10K_train"],
+        "val": ["KADID10K_val"],
+        "test": ["KADID10K_test"]
+    }
 
-    # KADID10KDataset에 전달하는 경로를 문자열로 변환
-    train_dataset = KADID10KDataset(str(args.data_base_path) + "/KADID10K", phase="train")
-    train_dataloader = DataLoader(train_dataset, batch_size=args.training.batch_size, shuffle=True)
+    for phase, dataset_name in datasets.items():
+        evaluate_and_log(args, model, dataset_name[0], None, 0, device)
 
-    model = SimCLR(args.model.encoder, args.model.temperature).to(device)
-    optimizer = torch.optim.Adam(model.parameters(), lr=args.training.lr)
-    scheduler = torch.optim.lr_scheduler.StepLR(optimizer, step_size=args.training.lr_step, gamma=args.training.lr_gamma)
+def evaluate_and_log(args: DotMap,
+                     model: torch.nn.Module,
+                     phase: str,
+                     logger: Optional[Run],
+                     num_logging_steps: int,
+                     device: torch.device) -> Tuple[float, float]:
+    model.eval()
 
-    train(args, model, train_dataloader, optimizer, scheduler, device) """
-
-if __name__ == "__main__":
-    from utils.utils import parse_args
-    args = parse_args()
-
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-
-    # Dataset 설정
-    train_dataset = KADID10KDataset(str(args.data_base_path) + "/KADID10K", phase="train")
-    val_dataset = KADID10KDataset(str(args.data_base_path) + "/KADID10K", phase="val")
-    test_dataset = KADID10KDataset(str(args.data_base_path) + "/KADID10K", phase="test")
-
-    train_dataloader = DataLoader(
-        train_dataset, batch_size=args.training.batch_size, shuffle=True, num_workers=args.training.num_workers
-    )
-    val_dataloader = DataLoader(
-        val_dataset, batch_size=args.validation.batch_size, shuffle=False, num_workers=args.validation.num_workers
-    )
-    test_dataloader = DataLoader(
-        test_dataset, batch_size=args.test.batch_size, shuffle=False, num_workers=args.test.num_workers
-    )
-
-    # 모델, 옵티마이저, 스케줄러 초기화
-    model = SimCLR(args.model.encoder, args.model.temperature).to(device)
-    optimizer = torch.optim.Adam(model.parameters(), lr=args.training.lr)
-    scheduler = torch.optim.lr_scheduler.StepLR(optimizer, step_size=args.training.lr_step, gamma=args.training.lr_gamma)
-    scaler = torch.amp.GradScaler()
-
-    # train 함수 호출
-    train(
-        args=args,
+    srocc_all, plcc_all, _, _, _ = get_results(
         model=model,
-        train_dataloader=train_dataloader,
-        val_dataloader=val_dataloader,
-        test_dataloader=test_dataloader,  # test_dataloader 추가
-        optimizer=optimizer,
-        scheduler=scheduler,
-        scaler=scaler,
-        device=device  # device 추가
+        data_base_path=args.data_base_path,
+        datasets=[phase],
+        num_splits=args.validation.num_splits,
+        phase=phase,
+        alpha=args.validation.alpha,
+        grid_search=False,
+        crop_size=args.test.crop_size,
+        batch_size=args.test.batch_size,
+        num_workers=args.test.num_workers,
+        device=device
     )
+
+    srocc_avg = np.median(srocc_all["global"])
+    plcc_avg = np.median(plcc_all["global"])
+
+    print(f"{phase.upper()} Results - SROCC: {srocc_avg:.4f}, PLCC: {plcc_avg:.4f}")
+
+    if logger:
+        logger.log({f"{phase}_srocc_avg": srocc_avg, f"{phase}_plcc_avg": plcc_avg}, step=num_logging_steps)
+
+    return srocc_avg, plcc_avg

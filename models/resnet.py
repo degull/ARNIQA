@@ -5,6 +5,7 @@ from torchvision.models import resnet50
 
 
 class ResNet(nn.Module):
+
     def __init__(self, embedding_dim: int, pretrained: bool = True, use_norm: bool = True):
         super(ResNet, self).__init__()
 
@@ -28,18 +29,13 @@ class ResNet(nn.Module):
         )
 
     def forward(self, x):
-        print(f"[DEBUG] ResNet input x shape: {x.shape}")
-        f = self.model(x)  # ResNet Backbone
-        print(f"[DEBUG] ResNet backbone output f shape: {f.shape}")
+        f = self.model(x)
         f = f.view(-1, self.feat_dim)
-        print(f"[DEBUG] ResNet flattened output f shape: {f.shape}")
 
         if self.use_norm:
             f = F.normalize(f, dim=1)
-            print(f"[DEBUG] ResNet normalized f shape: {f.shape}")
 
         g = self.projector(f)
-        print(f"[DEBUG] Projector output g shape: {g.shape}")
         if self.use_norm:
             return f, F.normalize(g, dim=1)
         else:
