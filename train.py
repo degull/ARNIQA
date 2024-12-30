@@ -214,17 +214,9 @@ def train(args: DotMap,
     checkpoint_path.mkdir(parents=True, exist_ok=True)
     print("Saving checkpoints in folder: ", checkpoint_path)
 
-    if args.training.resume_training:
-        start_epoch = args.training.start_epoch
-        max_epochs = args.training.epochs
-        best_srocc = args.best_srocc
-    else:
-        start_epoch = 0
-        max_epochs = args.training.epochs
-        best_srocc = 0
-
-    last_srocc, last_plcc = 0, 0
-    num_logging_steps = 0  # Initialize logging steps
+    start_epoch = args.training.start_epoch if args.training.resume_training else 0
+    max_epochs = args.training.epochs
+    best_srocc = args.best_srocc if args.training.resume_training else 0
 
     for epoch in range(start_epoch, max_epochs):
         model.train()
@@ -234,7 +226,6 @@ def train(args: DotMap,
         for i, batch in enumerate(progress_bar):
             optimizer.zero_grad()
 
-            # Flatten num_crops into batch_size dimension
             inputs_A = batch["img_A_orig"].to(device).view(-1, *batch["img_A_orig"].shape[2:])
             inputs_B = batch["img_B_orig"].to(device).view(-1, *batch["img_B_orig"].shape[2:])
 
@@ -252,61 +243,68 @@ def train(args: DotMap,
                 lr_scheduler.step(epoch + i / len(train_dataloader))
 
             running_loss += loss.item()
-            progress_bar.set_postfix(loss=running_loss / (i + 1), SROCC=last_srocc, PLCC=last_plcc)
+            progress_bar.set_postfix(loss=running_loss / (i + 1))
 
             if logger:
-                logger.log({"loss": loss.item()}, step=num_logging_steps)
-                num_logging_steps += 1  # Increment logging steps
+                logger.log({"loss": loss.item()})
 
         if lr_scheduler and lr_scheduler.__class__.__name__ != "CosineAnnealingWarmRestarts":
             lr_scheduler.step()
 
         if epoch % args.validation.frequency == 0:
             print("Validating...")
-            last_srocc, last_plcc = validate(args, model, logger, num_logging_steps, device)
+            last_srocc, last_plcc = validate(args, model, logger, device)
             print(f"Validation Results - SROCC: {last_srocc:.4f}, PLCC: {last_plcc:.4f}")
 
     print('Finished training')
 
-""" def validate(args: DotMap,
-             model: torch.nn.Module,
-             logger: Optional[Run],
-             num_logging_steps: int,
-             device: torch.device) -> Tuple[float, float]:
+    print("Testing...")
+    test(args, model, logger, device)
+
+def test(args: DotMap,
+         model: torch.nn.Module,
+         logger: Optional[Run],
+         device: torch.device) -> None:
     model.eval()
 
-    srocc_all, plcc_all, _, _, _ = get_results(model=model, data_base_path=args.data_base_path,
-                                               datasets=args.validation.datasets, num_splits=args.validation.num_splits,
-                                               phase="val", alpha=args.validation.alpha, grid_search=False,
-                                               crop_size=args.test.crop_size, batch_size=args.test.batch_size,
-                                               num_workers=args.test.num_workers, device=device)
+
+    srocc_all, plcc_all, _, _, _ = get_results(
+        model=model,
+        data_base_path=args.data_base_path,
+        datasets=args.test.datasets,
+        num_splits=args.test.num_splits,
+        phase="test",
+        alpha=args.test.alpha,
+        grid_search=args.test.grid_search,
+        crop_size=args.test.crop_size,
+        batch_size=args.test.batch_size,
+        num_workers=args.test.num_workers,
+        device=device
+    )
 
     srocc_all_median = {key: np.median(value["global"]) for key, value in srocc_all.items()}
     plcc_all_median = {key: np.median(value["global"]) for key, value in plcc_all.items()}
 
-    srocc_synthetic_avg = np.mean([srocc_all_median[key] for key in srocc_all_median.keys() if key in synthetic_datasets])
-    plcc_synthetic_avg = np.mean([plcc_all_median[key] for key in plcc_all_median.keys() if key in synthetic_datasets])
-    srocc_authentic_avg = np.mean([srocc_all_median[key] for key in srocc_all_median.keys() if key in authentic_datasets])
-    plcc_authentic_avg = np.mean([plcc_all_median[key] for key in plcc_all_median.keys() if key in authentic_datasets])
+    print("\nTest Dataset Results:")
+    print(f"{'Dataset':<15} {'SROCC':<15} {'PLCC':<15}")
+    for dataset, srocc_value in srocc_all_median.items():
+        plcc_value = plcc_all_median.get(dataset, 0)
+        print(f"{dataset:<15} {srocc_value:<15.4f} {plcc_value:<15.4f}")
 
-    srocc_avg = np.mean(list(srocc_all_median.values()))
-    plcc_avg = np.mean(list(plcc_all_median.values()))
+    synthetic_avg_srocc = np.mean([srocc_all_median.get(d, 0) for d in synthetic_datasets])
+    synthetic_avg_plcc = np.mean([plcc_all_median.get(d, 0) for d in synthetic_datasets])
+    authentic_avg_srocc = np.mean([srocc_all_median.get(d, 0) for d in authentic_datasets])
+    authentic_avg_plcc = np.mean([plcc_all_median.get(d, 0) for d in authentic_datasets])
 
-    if logger:
-        logger.log({f"val_srocc_{key}": srocc_all_median[key] for key in srocc_all_median.keys()}, step=num_logging_steps)
-        logger.log({f"val_plcc_{key}": plcc_all_median[key] for key in plcc_all_median.keys()}, step=num_logging_steps)
-        logger.log({"val_srocc_synthetic_avg": srocc_synthetic_avg, "val_plcc_synthetic_avg": plcc_synthetic_avg,
-                    "val_srocc_authentic_avg": srocc_authentic_avg, "val_plcc_authentic_avg": plcc_authentic_avg,
-                    "val_srocc_avg": srocc_avg, "val_plcc_avg": plcc_avg}, step=num_logging_steps)
-
-    return srocc_avg, plcc_avg
- """
+    print("\nSynthetic Averages:")
+    print(f"SROCC: {synthetic_avg_srocc:.4f}, PLCC: {synthetic_avg_plcc:.4f}")
+    print("\nAuthentic Averages:")
+    print(f"SROCC: {authentic_avg_srocc:.4f}, PLCC: {authentic_avg_plcc:.4f}")
 
 
 def validate(args: DotMap,
              model: torch.nn.Module,
              logger: Optional[Run],
-             num_logging_steps: int,
              device: torch.device) -> Tuple[float, float]:
     model.eval()
 
@@ -324,55 +322,8 @@ def validate(args: DotMap,
         device=device
     )
 
-    # Compute medians, handle empty lists
-    srocc_all_median = {
-        key: (np.median(value["global"]) if len(value["global"]) > 0 else 0.0)
-        for key, value in srocc_all.items()
-    }
-    plcc_all_median = {
-        key: (np.median(value["global"]) if len(value["global"]) > 0 else 0.0)
-        for key, value in plcc_all.items()
-    }
-
-    # Compute synthetic and authentic averages, handle NaN
-    def safe_mean(values):
-        if len(values) == 0:
-            return 0.0
-        mean_value = np.nanmean(values)
-        return mean_value if not np.isnan(mean_value) else 0.0
-
-    srocc_synthetic_avg = safe_mean([
-        srocc_all_median[key] for key in srocc_all_median.keys() if key in synthetic_datasets
-    ])
-    plcc_synthetic_avg = safe_mean([
-        plcc_all_median[key] for key in plcc_all_median.keys() if key in synthetic_datasets
-    ])
-    srocc_authentic_avg = safe_mean([
-        srocc_all_median[key] for key in srocc_all_median.keys() if key in authentic_datasets
-    ])
-    plcc_authentic_avg = safe_mean([
-        plcc_all_median[key] for key in plcc_all_median.keys() if key in authentic_datasets
-    ])
-
-    # Global averages
-    srocc_avg = safe_mean(list(srocc_all_median.values()))
-    plcc_avg = safe_mean(list(plcc_all_median.values()))
-
-    if logger:
-        logger.log({
-            f"val_srocc_{key}": srocc_all_median[key] for key in srocc_all_median.keys()
-        }, step=num_logging_steps)
-        logger.log({
-            f"val_plcc_{key}": plcc_all_median[key] for key in plcc_all_median.keys()
-        }, step=num_logging_steps)
-        logger.log({
-            "val_srocc_synthetic_avg": srocc_synthetic_avg,
-            "val_plcc_synthetic_avg": plcc_synthetic_avg,
-            "val_srocc_authentic_avg": srocc_authentic_avg,
-            "val_plcc_authentic_avg": plcc_authentic_avg,
-            "val_srocc_avg": srocc_avg,
-            "val_plcc_avg": plcc_avg
-        }, step=num_logging_steps)
+    srocc_avg = np.mean([np.median(value["global"]) for value in srocc_all.values()])
+    plcc_avg = np.mean([np.median(value["global"]) for value in plcc_all.values()])
 
     return srocc_avg, plcc_avg
 
@@ -388,6 +339,7 @@ def train_validate_test(args: DotMap,
 
     for phase, dataset_name in datasets.items():
         evaluate_and_log(args, model, dataset_name[0], None, 0, device)
+
 
 def evaluate_and_log(args: DotMap,
                      model: torch.nn.Module,
@@ -420,3 +372,64 @@ def evaluate_and_log(args: DotMap,
         logger.log({f"{phase}_srocc_avg": srocc_avg, f"{phase}_plcc_avg": plcc_avg}, step=num_logging_steps)
 
     return srocc_avg, plcc_avg
+
+
+if __name__ == "__main__":
+    import argparse
+    from utils.utils import parse_config, parse_command_line_args, merge_configs
+    from models.simclr import SimCLR
+
+    parser = argparse.ArgumentParser()
+    parser.add_argument('--config', type=str, required=True, help='Path to the configuration file')
+    cli_args = parser.parse_args()
+
+    config = parse_config(cli_args.config)
+    args = merge_configs(config, parse_command_line_args(config))
+
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+    #train_dataset = KADID10KDataset(
+    #    root=args['data_base_path'] / "KADID10K",
+    #    crop_size=args['training']['data']['patch_size'],
+    #    max_distortions=args['training']['data']['max_distortions'],
+    #    num_levels=args['training']['data']['num_levels'],
+    #    pristine_prob=args['training']['data']['pristine_prob']
+    #)
+
+    train_dataset = KADID10KDataset(
+    root=args.data_base_path / "KADID10K",
+    crop_size=args.training.data.patch_size,  # 논문과 동일한 크기 확인
+    max_distortions=args.training.data.max_distortions,
+    num_levels=args.training.data.num_levels,
+    pristine_prob=args.training.data.pristine_prob  # 프리스틴 이미지 포함 비율
+    )
+
+    train_dataloader = DataLoader(
+        train_dataset,
+        batch_size=args.training.batch_size,
+        num_workers=args.training.num_workers,
+        shuffle=True,
+        pin_memory=True,
+        drop_last=True
+    )
+
+    model = SimCLR(encoder_params=args.model.encoder, temperature=args.model.temperature).to(device)
+
+    optimizer = torch.optim.SGD(
+        model.parameters(),
+        lr=args.training.lr,
+        momentum=args.training.optimizer.momentum,
+        weight_decay=args.training.optimizer.weight_decay
+    )
+
+    lr_scheduler = None
+    if args.training.lr_scheduler.name == "CosineAnnealingWarmRestarts":
+        lr_scheduler = torch.optim.lr_scheduler.CosineAnnealingWarmRestarts(
+            optimizer,
+            T_0=args.training.lr_scheduler.T_0,
+            T_mult=args.training.lr_scheduler.T_mult,
+            eta_min=args.training.lr_scheduler.eta_min,
+        )
+
+    scaler = torch.cuda.amp.GradScaler()
+    train(args, model, train_dataloader, optimizer, lr_scheduler, scaler, None, device)

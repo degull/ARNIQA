@@ -35,7 +35,7 @@ training:
     name: CosineAnnealingWarmRestarts   # 학습률 스케줄러 이름
     T_0: 1    # CosineAnnealingWarmRestarts의 T_0 값
     T_mult: 2   # CosineAnnealingWarmRestarts의 T_mult 값
-    eta_min: !!float 1e-6   # 최소 학습률
+    eta_min: !!float 1e-5   # 최소 학습률
 
 # Validation
 validation:

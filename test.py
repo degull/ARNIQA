@@ -35,10 +35,11 @@ def test(args: DotMap, model: nn.Module, logger: Run, device: torch.device) -> N
     eval_type = args.get("eval_type", "scratch")
     model.eval()
 
+    # Get results for the test dataset
     srocc_all, plcc_all, regressors, alphas, best_worst_results_all = get_results(
         model=model,
         data_base_path=args.data_base_path,
-        datasets=args.test.datasets,
+        datasets=args.test.datasets,  # Test datasets defined in config
         num_splits=args.test.num_splits,
         phase="test",
         alpha=args.test.alpha,
@@ -56,28 +57,52 @@ def test(args: DotMap, model: nn.Module, logger: Run, device: torch.device) -> N
             srocc_all[key] = {"global": [0.0]}
             plcc_all[key] = {"global": [0.0]}
 
-    # Log results
+    # Compute medians
     srocc_all_median = {key: np.median(value["global"]) for key, value in srocc_all.items()}
     plcc_all_median = {key: np.median(value["global"]) for key, value in plcc_all.items()}
 
+    # Compute synthetic and authentic averages
     srocc_synthetic_avg = np.mean([srocc_all_median.get(key, 0) for key in synthetic_datasets])
     plcc_synthetic_avg = np.mean([plcc_all_median.get(key, 0) for key in synthetic_datasets])
     srocc_authentic_avg = np.mean([srocc_all_median.get(key, 0) for key in authentic_datasets])
     plcc_authentic_avg = np.mean([plcc_all_median.get(key, 0) for key in authentic_datasets])
 
-    print(f"{'Dataset':<15} {'Alpha':<15} {'SROCC':<15} {'PLCC':<15}")
+    # Print results
+    print("\nTest Dataset Results:")
+    print(f"{'Dataset':<15} {'SROCC':<10} {'PLCC':<10}")
     for dataset in srocc_all_median.keys():
-        print(f"{dataset:<15} {alphas.get(dataset, 0):<15.4f} {srocc_all_median[dataset]:<15.4f} {plcc_all_median[dataset]:<15.4f}")
-    print(f"{'Synthetic avg':<15} {srocc_synthetic_avg:<15.4f} {plcc_synthetic_avg:<15.4f}")
-    print(f"{'Authentic avg':<15} {srocc_authentic_avg:<15.4f} {plcc_authentic_avg:<15.4f}")
+        print(f"{dataset:<15} {srocc_all_median[dataset]:<10.4f} {plcc_all_median[dataset]:<10.4f}")
 
-    # Save results
+    # Print averages
+    print("\nSynthetic Averages:")
+    print(f"SROCC: {srocc_synthetic_avg:.4f}, PLCC: {plcc_synthetic_avg:.4f}")
+    print("Authentic Averages:")
+    print(f"SROCC: {srocc_authentic_avg:.4f}, PLCC: {plcc_authentic_avg:.4f}")
+
+    # Log results to W&B if enabled
+    if logger:
+        logger.log({
+            "test_srocc_synthetic_avg": srocc_synthetic_avg,
+            "test_plcc_synthetic_avg": plcc_synthetic_avg,
+            "test_srocc_authentic_avg": srocc_authentic_avg,
+            "test_plcc_authentic_avg": plcc_authentic_avg
+        })
+        logger.log({
+            f"test_srocc_{dataset}": srocc_all_median[dataset] for dataset in srocc_all_median.keys()
+        })
+        logger.log({
+            f"test_plcc_{dataset}": plcc_all_median[dataset] for dataset in plcc_all_median.keys()
+        })
+
+    # Save detailed results to an Excel file
     workbook = openpyxl.Workbook()
     median_sheet = workbook.create_sheet('Median', 0)
-    median_sheet.append(['Dataset', 'Alpha', 'SROCC', 'PLCC'])
+    median_sheet.append(['Dataset', 'SROCC', 'PLCC'])
     for dataset in srocc_all_median.keys():
-        median_sheet.append([dataset, alphas.get(dataset, 0), srocc_all_median[dataset], plcc_all_median[dataset]])
-    workbook.save(checkpoint_path / 'results.xlsx')
+        median_sheet.append([dataset, srocc_all_median[dataset], plcc_all_median[dataset]])
+    workbook.save(checkpoint_path / 'test_results.xlsx')
+
+
 
 
 def get_results(model: nn.Module,

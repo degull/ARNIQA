@@ -49,7 +49,7 @@ def main():
     # Initialize the training dataset and dataloader
     train_dataset = KADID10KDataset(
         root=args['data_base_path'] / "KADID10K",
-        crop_size=args['training']['data']['patch_size'],  # 수정된 부분
+        crop_size=args['training']['data']['patch_size'],
         max_distortions=args['training']['data']['max_distortions'],
         num_levels=args['training']['data']['num_levels'],
         pristine_prob=args['training']['data']['pristine_prob']
@@ -124,14 +124,25 @@ def main():
     print("--- Training finished ---")
 
     # Testing
-    checkpoint_path = args.checkpoint_base_path / args.experiment_name / "pretrain"
-    checkpoint_path = [ckpt_path for ckpt_path in checkpoint_path.glob("*.pth") if "best" in ckpt_path.name][0]
-    checkpoint = torch.load(checkpoint_path, map_location="cpu")
-    model.load_state_dict(checkpoint, strict=True)
-    model.to(device)
-    print("Starting testing with best checkpoint...")
+    try:
+        checkpoint_path = args.checkpoint_base_path / args.experiment_name / "pretrain"
+        checkpoint_files = [ckpt_path for ckpt_path in checkpoint_path.glob("*.pth") if "best" in ckpt_path.name]
 
-    test(args, model, logger, device)
+        if not checkpoint_files:
+            raise FileNotFoundError(f"No checkpoint file with 'best' in name found in {checkpoint_path}")
+
+        checkpoint = torch.load(checkpoint_files[0], map_location="cpu")
+        model.load_state_dict(checkpoint, strict=True)
+        model.to(device)
+        print("Starting testing with best checkpoint...")
+        test(args, model, logger, device)
+    except FileNotFoundError as e:
+        print(f"Checkpoint file not found: {e}")
+        print("Testing skipped due to missing checkpoint.")
+    except Exception as e:
+        print(f"An unexpected error occurred while loading the checkpoint: {e}")
+        raise e  # Reraise to debug further
+
     print("--- Testing finished ---")
 
 if __name__ == "__main__":
