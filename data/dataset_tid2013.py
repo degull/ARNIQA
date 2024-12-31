@@ -1,14 +1,14 @@
-""" import pandas as pd
-import re
+import pandas as pd
 import numpy as np
+import re
 from PIL import Image, ImageFilter
 import torch
 from torch.utils.data import Dataset
 from torchvision import transforms
-import random
 from pathlib import Path
+import random
 
-# Distortion types mapping
+# 왜곡 유형 매핑
 distortion_types_mapping = {
     1: "gaussian_blur",
     2: "lens_blur",
@@ -37,171 +37,218 @@ distortion_types_mapping = {
     25: "contrast_change"
 }
 
-# TID2013Dataset 클래스 수정
+# 왜곡 그룹 정의
+distortion_groups = {
+    'blur': [1, 2, 3],
+    'color': [4, 5, 6, 7, 8],
+    'compression': [9, 10],
+    'noise': [11, 12, 13, 14],
+    'enhancement': [15, 16, 17],
+    'shift': [18, 19],
+    'others': [20, 21, 22, 23, 24, 25]
+}
+
+# 각 왜곡에 대한 강도 레벨 정의
+distortion_levels = {
+    'gaussian_blur': [0.5, 1.0, 1.5, 2.0, 2.5],
+    'lens_blur': [1, 2, 3, 4, 5],
+    'motion_blur': [1, 2, 3, 4, 5],
+    'color_diffusion': [0.05, 0.1, 0.2, 0.3, 0.4],
+    'color_shift': [-30, -20, -10, 10, 20],
+    'color_quantization': [8, 16, 32, 64, 128],
+    'color_saturation_1': [0.5, 0.6, 0.7, 0.8, 1.0],
+    'color_saturation_2': [0.5, 0.6, 0.7, 0.8, 1.0],
+    'jpeg2000': [0.1, 0.2, 0.3, 0.4, 0.5],
+    'jpeg': [0.1, 0.2, 0.3, 0.4, 0.5],
+    'white_noise': [5, 10, 15, 20, 25],
+    'impulse_noise': [0.05, 0.1, 0.2, 0.3, 0.4],
+    'multiplicative_noise': [0.1, 0.2, 0.3, 0.4, 0.5],
+    'denoise': [0.5, 0.6, 0.7, 0.8, 1.0],
+    'brighten': [10, 20, 30, 40, 50],
+    'darken': [10, 20, 30, 40, 50],
+    'mean_shift': [5, 10, 15, 20, 25],
+    'jitter': [5, 10, 15, 20, 25],
+    'non_eccentricity_patch': [0.5, 1.0, 1.5, 2.0, 2.5],
+    'pixelate': [5, 10, 15, 20, 25],
+    'quantization': [2, 4, 8, 16, 32],
+    'color_block': [10, 20, 30, 40, 50],
+    'high_sharpen': [1, 2, 3, 4, 5],
+    'contrast_change': [0.5, 0.6, 0.7, 0.8, 1.0]
+}
+
 class TID2013Dataset(Dataset):
     def __init__(self, root: str, phase: str = "train", split_idx: int = 0, crop_size: int = 224):
-        self.root = Path(root)
+        super().__init__()
+        self.root = Path(root).parent
         self.phase = phase
         self.crop_size = crop_size
-        self.is_synthetic = True
 
-        # Load scores from CSV
-        scores_csv = pd.read_csv(self.root / "mos.csv")
-        self.images = scores_csv["image_id"].values.tolist()
-        self.mos = np.array(scores_csv["mean"].values.tolist())
+        # MOS 값 읽기
+        csv_path = Path(root)
+        if not csv_path.exists():
+            raise FileNotFoundError(f"CSV 파일이 존재하지 않습니다: {csv_path}")
 
-        self.images = np.array([self.root / "distorted_images" / el for el in self.images])
-        self.ref_images = [el.split("_")[0].upper() + ".BMP" for el in scores_csv["image_id"].values.tolist()]
-        self.ref_images = np.array([self.root / "reference_images" / el for el in self.ref_images])
+        scores_csv = pd.read_csv(csv_path)
+        self.images = scores_csv["image_id"].values
+        self.mos = scores_csv["mean"].values
 
-        if self.phase != "all":
-            split_idxs = np.load(self.root / "splits" / f"{self.phase}.npy")[split_idx]
-            split_idxs = np.array(list(filter(lambda x: x != -1, split_idxs)))
-            self.images = self.images[split_idxs]
-            self.ref_images = self.ref_images[split_idxs]
-            self.mos = self.mos[split_idxs]
+        # 이미지 경로 설정
+        self.image_paths = [self.root / "distorted_images" / img for img in self.images]
+        self.reference_paths = [self.root / "reference_images" / f"{img.split('_')[0]}.BMP" for img in self.images]
 
-        self.distortion_types = []
-        for image in self.images:
-            match = re.search(r'I\d+_(\d+)_(\d+)\.bmp$', str(image))
-            dist_type = distortion_types_mapping[int(match.group(1))] if match else None
-            self.distortion_types.append(dist_type)
+        # Split 설정
+        split_file_path = self.root / "splits" / f"{phase}.npy"
+        if not split_file_path.exists():
+            raise FileNotFoundError(f"Split 파일이 존재하지 않습니다: {split_file_path}")
+        split_idxs = np.load(split_file_path)[split_idx]
+        split_idxs = np.array([idx for idx in split_idxs if idx != -1])  # 유효한 인덱스만 필터링
+        self.image_paths = np.array(self.image_paths)[split_idxs]
+        self.reference_paths = np.array(self.reference_paths)[split_idxs]
+        self.mos = np.array(self.mos)[split_idxs]
 
-    def apply_distortion(self, image):
-        if random.random() > 0.5:
-            pil_image = transforms.ToPILImage()(image)
-            distorted_image = pil_image.filter(ImageFilter.GaussianBlur(radius=2))
-            return transforms.ToTensor()(distorted_image)
-        return image
-
-    def __getitem__(self, index: int) -> dict:
-        try:
-            img_A_orig = Image.open(self.images[index]).convert("RGB")
-            img_B_orig = Image.open(self.ref_images[index]).convert("RGB")
-        except Exception as e:
-            # None 반환 시 에러 원인을 로그로 출력
-            print(f"Error loading image: {self.images[index]} or {self.ref_images[index]}: {e}")
-            return None
-
-        img_A_orig = self.transform(img_A_orig)
-        img_B_orig = self.transform(img_B_orig)
-
-        crops_A = [img_A_orig]
-        crops_B = [img_B_orig]
-
-        distorted_crops_A = [self.apply_distortion(img_A_orig) for _ in range(3)]
-        distorted_crops_B = [self.apply_distortion(img_B_orig) for _ in range(3)]
-
-        crops_A += distorted_crops_A
-        crops_B += distorted_crops_B
-
-        img_A = torch.stack(crops_A)
-        img_B = torch.stack(crops_B)
-
-        img_A = img_A.unsqueeze(0)
-        img_B = img_B.unsqueeze(0)
-
-        return {
-            "img_A_orig": img_A,
-            "img_B_orig": img_B,
-            "img_A_ds": img_A,
-            "img_B_ds": img_B,
-            "mos": self.mos[index],
-            "distortion_type": self.distortion_types[index],
-        }
-
-    def transform(self, image):
+    def transform(self, image: Image) -> torch.Tensor:
         return transforms.Compose([
             transforms.Resize((self.crop_size, self.crop_size)),
             transforms.ToTensor(),
         ])(image)
 
+    def apply_random_distortions(self, image, num_distortions=4):
+        """이미지에 랜덤하게 여러 왜곡 적용."""
+        selected_distortions = random.sample(list(distortion_levels.keys()), num_distortions)
+        for distortion in selected_distortions:
+            level = random.choice(distortion_levels[distortion])
+            image = self.apply_distortion(image, distortion, level)
+        return image
+
+
+
+    def apply_distortion(self, image, distortion, level):
+        """
+        Apply a specific distortion to the given image.
+
+        Args:
+            image (PIL.Image): The input image to distort.
+            distortion (str): The type of distortion to apply.
+            level (float/int): The intensity level of the distortion.
+
+        Returns:
+            PIL.Image: The distorted image.
+        """
+        if distortion == "gaussian_blur":
+            image = image.filter(ImageFilter.GaussianBlur(radius=level))
+        elif distortion == "lens_blur":
+            image = image.filter(ImageFilter.GaussianBlur(radius=level))
+        elif distortion == "motion_blur":
+            image = image.filter(ImageFilter.BoxBlur(level))
+        elif distortion == "color_diffusion":
+            # Add random uniform noise for color diffusion
+            diffused = np.array(image, dtype=np.float64)  # Ensure the array is float64 for uniform addition
+            diffused += np.random.uniform(-level, level, diffused.shape)
+            diffused = np.clip(diffused, 0, 255).astype(np.uint8)  # Clip and convert back to uint8
+            image = Image.fromarray(diffused)
+
+        elif distortion == "color_saturation_2":
+            hsv_image = np.array(image.convert("HSV"))
+            hsv_image[..., 1] = np.clip(hsv_image[..., 1] * level, 0, 255)
+            image = Image.fromarray(hsv_image.astype(np.uint8)).convert("RGB")
+        elif distortion == "white_noise":
+            noise = np.random.normal(0, level, (image.height, image.width, 3))
+            noisy_image = np.array(image) + noise
+            image = Image.fromarray(np.clip(noisy_image, 0, 255).astype(np.uint8))
+        elif distortion == "impulse_noise":
+            image = np.array(image)
+            prob = level * 0.01
+            for i in range(image.shape[0]):
+                for j in range(image.shape[1]):
+                    if random.random() < prob:
+                        image[i][j] = np.random.choice([0, 255], size=3)
+            image = Image.fromarray(image)
+        elif distortion == "jpeg":
+            image = image.resize((image.width // 2, image.height // 2))
+        elif distortion == "jpeg2000":
+            image = image.resize((image.width // 4, image.height // 4))
+        elif distortion == "color_quantization":
+            quantized = np.array(image) // level * level
+            image = Image.fromarray(quantized.astype(np.uint8))
+        elif distortion == "denoise":
+            image = image.filter(ImageFilter.GaussianBlur(radius=level * 0.5))
+        elif distortion == "brighten":
+            level = max(level, 0)  # Ensure the level is non-negative
+            enhancer = transforms.ColorJitter(brightness=level)
+            image = enhancer(image)
+
+        elif distortion == "darken":
+            # Decrease brightness
+            level = min(level, 1)  # Ensure the level does not exceed 1
+            enhancer = transforms.ColorJitter(brightness=1 - level)
+            image = enhancer(image)
+
+        elif distortion == "mean_shift":
+            shifted = np.array(image) + level
+            image = Image.fromarray(np.clip(shifted, 0, 255).astype(np.uint8))
+        elif distortion == "color_shift":
+            # Shift the color channels randomly
+            shifted = np.array(image, dtype=np.int32)
+            if level > 0:  # Ensure level is positive
+                shifted += np.random.randint(-level, level + 1, shifted.shape)  # Avoid low >= high
+            image = Image.fromarray(np.clip(shifted, 0, 255).astype(np.uint8))
+
+        elif distortion == "jitter":
+            # Apply small random pixel jitter
+            jittered = np.array(image, dtype=np.int32)
+            if level > 0:  # Ensure level is positive
+                jittered += np.random.randint(-level, level + 1, jittered.shape)  # Avoid low >= high
+            image = Image.fromarray(np.clip(jittered, 0, 255).astype(np.uint8))
+
+        elif distortion == "non_eccentricity_patch":
+            image = image.filter(ImageFilter.GaussianBlur(radius=level))
+        elif distortion == "color_block":
+            # Apply color blocking by reducing resolution
+            block_size = min(level, image.width, image.height)  # 제한 추가
+            if block_size > 0:  # block_size가 유효한지 확인
+                small = image.resize((image.width // block_size, image.height // block_size), Image.NEAREST)
+                image = small.resize((image.width, image.height), Image.NEAREST)
+
+        elif distortion == "pixelate":
+            # Simulate pixelation by downsampling and upsampling
+            block_size = min(level, image.width, image.height)  # 제한 추가
+            if block_size > 0:  # block_size가 유효한지 확인
+                small = image.resize((image.width // block_size, image.height // block_size), Image.NEAREST)
+                image = small.resize((image.width, image.height), Image.NEAREST)
+
+        elif distortion == "quantization":
+            quantized = np.array(image) // level * level
+            image = Image.fromarray(quantized.astype(np.uint8))
+        
+        elif distortion == "high_sharpen":
+            image = image.filter(ImageFilter.UnsharpMask(radius=level, percent=150, threshold=3))
+        elif distortion == "contrast_change":
+            enhancer = transforms.ColorJitter(contrast=level)
+            image = enhancer(image)
+        return image
+
+
+
+
+    def __getitem__(self, index: int):
+        img_A_orig = Image.open(self.image_paths[index]).convert("RGB")
+        img_B_ref = Image.open(self.reference_paths[index]).convert("RGB")
+
+        # 랜덤 왜곡을 두 이미지에 적용
+        img_A_distorted = self.apply_random_distortions(img_A_orig)
+        img_B_distorted = self.apply_random_distortions(img_B_ref)
+
+        # 이미지를 텐서로 변환
+        img_A_orig = self.transform(img_A_orig)
+        img_B_ref = self.transform(img_B_ref)
+        img_A_distorted = self.transform(img_A_distorted)
+        img_B_distorted = self.transform(img_B_distorted)
+
+        return {
+            "img_A": torch.stack([img_A_orig, img_A_distorted]),
+            "img_B": torch.stack([img_B_ref, img_B_distorted]),
+            "mos": self.mos[index]
+        }
+
     def __len__(self):
-        return len(self.images)
-
-# collate_fn 함수 강화
-def collate_fn(batch):
-    batch = [x for x in batch if x is not None]  # None 값 필터링
-    if len(batch) == 0:  # 배치가 비어있을 경우 빈 딕셔너리 반환
-        return {
-            "img_A_orig": torch.empty(0),
-            "img_B_orig": torch.empty(0),
-            "img_A_ds": torch.empty(0),
-            "img_B_ds": torch.empty(0),
-            "mos": torch.empty(0),
-            "distortion_type": []
-        }
-    return torch.utils.data.dataloader.default_collate(batch)
-
-
-# Custom collate_fn to handle None values
-def collate_fn(batch):
-    batch = [x for x in batch if x is not None]  # None 값 필터링
-    if len(batch) == 0:  # 배치가 비어있을 경우 빈 딕셔너리 반환
-        return {
-            "img_A_orig": torch.empty(0),
-            "img_B_orig": torch.empty(0),
-            "img_A_ds": torch.empty(0),
-            "img_B_ds": torch.empty(0),
-            "mos": torch.empty(0),
-            "distortion_type": []
-        }
-    return torch.utils.data.dataloader.default_collate(batch)
-
-# Example DataLoader
-if __name__ == "__main__":
-    dataset = TID2013Dataset(root="path_to_tid2013_dataset", phase="train")
-    dataloader = torch.utils.data.DataLoader(dataset, batch_size=16, shuffle=True, collate_fn=collate_fn)
-
-    for batch in dataloader:
-        if batch is None:
-            continue
-        print(batch)
- """
-
-# TID2013Dataset 클래스
-
-import os
-import pandas as pd
-import numpy as np
-from PIL import Image
-import torch
-from torch.utils.data import Dataset
-from torchvision import transforms
-
-class TID2013Dataset(Dataset):
-    def __init__(self, root, phase="train", crop_size=224, transform=None):
-        self.root = root
-        self.phase = phase
-        self.crop_size = crop_size
-        self.transform = transform if transform else transforms.Compose([
-            transforms.Resize((crop_size, crop_size)),
-            transforms.ToTensor()
-        ])
-
-        scores_csv = pd.read_csv(os.path.join(root, "mos.csv"))
-        self.images = scores_csv["image_id"].values
-        self.mos = scores_csv["mean"].values
-        self.image_paths = [os.path.join(root, "distorted_images", img) for img in self.images]
-        self.reference_paths = [os.path.join(root, "reference_images", img.split("_")[0] + ".BMP") for img in self.images]
-
-    def __len__(self):
-        return len(self.images)
-
-    def load_image(self, path):
-        """이미지를 로드하고 필요시 변환합니다."""
-        image = Image.open(path).convert("RGB")
-        if self.transform:
-            image = self.transform(image)
-        return image  # [3, H, W] 형식 유지
-
-    def __getitem__(self, index):
-        img_A_orig = self.load_image(self.image_paths[index])
-        img_A_ds = self.load_image(self.reference_paths[index])
-        mos = torch.tensor(self.mos[index], dtype=torch.float32)
-
-        return {
-            "img_A_orig": img_A_orig,
-            "img_A_ds": img_A_ds,
-            "mos": mos
-        }
+        return len(self.image_paths)

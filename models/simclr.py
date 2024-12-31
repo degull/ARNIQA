@@ -1,163 +1,49 @@
-""" import torch
+
+import torch
 import torch.nn as nn
 from models.resnet import ResNet
 
-
 class SimCLR(nn.Module):
-
-    def __init__(self, encoder_params: dict, temperature: float = 0.1):
+    def __init__(self, encoder_params, temperature=0.1):
         super(SimCLR, self).__init__()
-
-        # Extract encoder parameters from the dictionary
-        embedding_dim = encoder_params['embedding_dim']
-        pretrained = encoder_params['pretrained']
-        use_norm = encoder_params['use_norm']
-
-        # Initialize the ResNet encoder
-        self.encoder = ResNet(
-            embedding_dim=embedding_dim,
-            pretrained=pretrained,
-            use_norm=use_norm
-        )
-
-        self.temperature = temperature
-        self.criterion = nt_xent_loss
-
-    def forward(self, im_q, im_k=None):
-        #print(f"im_q shape: {im_q.shape}")  # Debugging message
-        assert im_q.ndim == 4, f"Expected 4D input for im_q, but got {im_q.shape}"
-        q, proj_q = self.encoder(im_q)
-
-        if not self.training:
-            return q, proj_q
-
-        assert im_k is not None, "im_k must be provided during training"
-        assert im_k.ndim == 4, f"Expected 4D input for im_k, but got {im_k.shape}"
-        k, proj_k = self.encoder(im_k)
-
-        loss = self.criterion(proj_q, proj_k, self.temperature)
-        return loss
-
-
-
-
-def nt_xent_loss(a: torch.Tensor, b: torch.Tensor, tau: float = 0.1):
-
-    a_norm = torch.norm(a, dim=1).reshape(-1, 1)
-    a_cap = torch.div(a, a_norm)
-    b_norm = torch.norm(b, dim=1).reshape(-1, 1)
-    b_cap = torch.div(b, b_norm)
-
-    a_cap_b_cap = torch.cat([a_cap, b_cap], dim=0)
-    sim = torch.mm(a_cap_b_cap, a_cap_b_cap.t())
-    sim /= tau
-
-    exp_sim = torch.exp(sim)
-    mask = torch.eye(exp_sim.size(0), device=exp_sim.device).bool()
-    exp_sim = exp_sim.masked_fill(mask, 0)
-
-    row_sum = exp_sim.sum(dim=1, keepdim=True)
-    log_prob = sim - torch.log(row_sum + 1e-10)
-
-    pos_mask = torch.cat(
-        [torch.arange(exp_sim.size(0) // 2, device=exp_sim.device) for _ in range(2)],
-        dim=0
-    ).reshape(exp_sim.size(0), -1)
-    pos_log_prob = log_prob.gather(dim=1, index=pos_mask).diag()
-    loss = -pos_log_prob.mean()
-    return loss
-
- """
-## 원본과 동일하게
-
-import torch
-import torch.nn
-from dotmap import DotMap
-
-from models.resnet import ResNet
-
-
-class SimCLR(torch.nn.Module):
-
-    def __init__(self, encoder_params: DotMap, temperature: float = 0.1):
-        super(SimCLR, self).__init__()
-
-        # Initialize the ResNet encoder with provided parameters
         self.encoder = ResNet(
             embedding_dim=encoder_params.embedding_dim,
-            pretrained=encoder_params.pretrained,
-            use_norm=encoder_params.use_norm
+            pretrained=encoder_params.pretrained
         )
-
         self.temperature = temperature
-        self.criterion = nt_xent_loss
+        self.criterion = nt_xent_loss  # nt_xent_loss를 초기화
 
     def forward(self, im_q, im_k=None):
-        # Extract embeddings for the query image
+        if im_q.dim() == 5:
+            im_q = im_q.view(-1, *im_q.shape[2:])
+        if im_k is not None and im_k.dim() == 5:
+            im_k = im_k.view(-1, *im_k.shape[2:])
+
         q, proj_q = self.encoder(im_q)
 
+        if im_k is not None:
+            k, proj_k = self.encoder(im_k)
+        else:
+            proj_k = None  # Key가 없는 경우 None으로 설정
+
         if not self.training:
-            # During evaluation, return query embeddings
-            return q, proj_q
+            return proj_q, proj_k  # 검증 단계에서 두 값 반환
 
-        # Extract embeddings for the key image during training
-        k, proj_k = self.encoder(im_k)
-
-        # Compute NT-Xent loss
         loss = self.criterion(proj_q, proj_k, self.temperature)
         return loss
 
+def nt_xent_loss(proj_q, proj_k, tau=0.1):
+    q_norm = nn.functional.normalize(proj_q, dim=1)
+    k_norm = nn.functional.normalize(proj_k, dim=1)
+    batch_size = proj_q.size(0)
 
-""" def nt_xent_loss(a: torch.Tensor, b: torch.Tensor, tau: float = 0.1):
+    positives = torch.sum(q_norm * k_norm, dim=1) / tau
+    negatives = torch.mm(q_norm, q_norm.t()) / tau
 
-    # Normalize the feature vectors
-    a_norm = torch.norm(a, dim=1, keepdim=True)
-    a_cap = a / (a_norm + 1e-10)
-    b_norm = torch.norm(b, dim=1, keepdim=True)
-    b_cap = b / (b_norm + 1e-10)
+    labels = torch.arange(batch_size).to(proj_q.device)
+    mask = torch.eye(batch_size).bool().to(proj_q.device)
 
-    # Concatenate normalized features
-    a_cap_b_cap = torch.cat([a_cap, b_cap], dim=0)
-
-    # Compute similarity matrix and scale by temperature
-    sim = torch.mm(a_cap_b_cap, a_cap_b_cap.t()) / tau
-
-    # Compute exponential of similarity and mask diagonal
-    exp_sim = torch.exp(sim)
-    mask = torch.eye(exp_sim.size(0), device=exp_sim.device).bool()
-    exp_sim = exp_sim.masked_fill(mask, 0)
-
-    # Compute row-wise normalization
-    row_sum = exp_sim.sum(dim=1, keepdim=True)
-    log_prob = sim - torch.log(row_sum + 1e-10)
-
-    # Construct positive pair mask
-    pos_mask = torch.arange(exp_sim.size(0) // 2, device=exp_sim.device).repeat(2)
-    pos_mask = pos_mask.reshape(exp_sim.size(0), -1)
-
-    # Extract log probabilities for positive pairs
-    pos_log_prob = log_prob.gather(dim=1, index=pos_mask).diag()
-
-    # Compute loss as negative mean log probability
-    loss = -pos_log_prob.mean()
-    return loss """
-
-
-def nt_xent_loss(a: torch.Tensor, b: torch.Tensor, tau: float = 0.1):
-    a_norm = torch.norm(a, dim=1).reshape(-1, 1)
-    a_cap = torch.div(a, a_norm)
-    b_norm = torch.norm(b, dim=1).reshape(-1, 1)
-    b_cap = torch.div(b, b_norm)
-    a_cap_b_cap = torch.cat([a_cap, b_cap], dim=0)
-    a_cap_b_cap_transpose = torch.t(a_cap_b_cap)
-    b_cap_a_cap = torch.cat([b_cap, a_cap], dim=0)
-    sim = torch.mm(a_cap_b_cap, a_cap_b_cap_transpose)
-    sim_by_tau = torch.div(sim, tau)
-    exp_sim_by_tau = torch.exp(sim_by_tau)
-    sum_of_rows = torch.sum(exp_sim_by_tau, dim=1)
-    exp_sim_by_tau_diag = torch.diag(exp_sim_by_tau)
-    numerators = torch.exp(torch.div(torch.nn.CosineSimilarity()(a_cap_b_cap, b_cap_a_cap), tau))
-    denominators = sum_of_rows - exp_sim_by_tau_diag
-    num_by_den = torch.div(numerators, denominators)
-    neglog_num_by_den = -torch.log(num_by_den)
-    return torch.mean(neglog_num_by_den)
+    negatives = negatives.masked_fill(mask, -float('inf'))
+    logits = torch.cat([positives.unsqueeze(1), negatives], dim=1)
+    loss = nn.CrossEntropyLoss()(logits, labels)
+    return loss

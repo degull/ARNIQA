@@ -1,3 +1,4 @@
+
 import torch.nn as nn
 import torch.nn.functional as F
 import torchvision
@@ -14,7 +15,7 @@ class ResNet(nn.Module):
         self.embedding_dim = embedding_dim
 
         if self.pretrained:
-            weights = torchvision.models.ResNet50_Weights.IMAGENET1K_V1   # V1 weights work better than V2
+            weights = torchvision.models.ResNet50_Weights.IMAGENET1K_V1
         else:
             weights = None
         self.model = resnet50(weights=weights)
@@ -22,10 +23,11 @@ class ResNet(nn.Module):
         self.feat_dim = self.model.fc.in_features
         self.model = nn.Sequential(*list(self.model.children())[:-1])
 
+        # Projector uses embedding_dim for output
         self.projector = nn.Sequential(
-            nn.Linear(self.feat_dim, self.feat_dim),
+            nn.Linear(self.feat_dim, self.embedding_dim),
             nn.ReLU(),
-            nn.Linear(self.feat_dim, self.embedding_dim)
+            nn.Linear(self.embedding_dim, self.embedding_dim)
         )
 
     def forward(self, x):
@@ -40,3 +42,4 @@ class ResNet(nn.Module):
             return f, F.normalize(g, dim=1)
         else:
             return f, g
+ 
