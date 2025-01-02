@@ -1,4 +1,4 @@
-
+""" 
 
 import pandas as pd
 import re
@@ -114,6 +114,9 @@ class SPAQDataset(Dataset):
 
     def apply_distortion(self, image, distortion, level):
 
+        if not isinstance(image, Image.Image):
+            raise TypeError("apply_distortion 함수는 PIL.Image 객체만 처리할 수 있습니다.")
+
         if distortion == "gaussian_blur":
             image = image.filter(ImageFilter.GaussianBlur(radius=level))
         elif distortion == "lens_blur":
@@ -208,6 +211,7 @@ class SPAQDataset(Dataset):
         return image
 
     def apply_random_distortions(self, image, num_distortions=4):
+
         distortions = random.sample(list(distortion_levels.keys()), num_distortions)
         for distortion in distortions:
             level = random.choice(distortion_levels[distortion])
@@ -215,24 +219,139 @@ class SPAQDataset(Dataset):
         return image
 
     def __getitem__(self, index: int):
-        # 원본 이미지 로드 및 변환
+
+        # 원본 이미지 로드 (PIL 상태 유지)
         img_orig = Image.open(self.image_paths[index]).convert("RGB")
-        img_orig = self.transform(img_orig)
 
-        # 왜곡된 이미지 생성
+        # 왜곡된 이미지 생성 (PIL 상태에서 처리)
         img_distorted = self.apply_random_distortions(img_orig)
-        img_distorted = self.transform(img_distorted)
 
-        # 디버깅: 이미지 텐서의 모양 출력
-        print(f"img_orig shape: {img_orig.shape}, img_distorted shape: {img_distorted.shape}")
+        # 텐서 변환 (왜곡 후)
+        img_orig_tensor = self.transform(img_orig)
+        img_distorted_tensor = self.transform(img_distorted)
+
+        # 디버깅: 텐서의 형태 확인
+        print(f"Original Tensor Shape: {img_orig_tensor.shape}, Distorted Tensor Shape: {img_distorted_tensor.shape}")
 
         return {
-            "img_A": img_orig,
-            "img_B": img_distorted,
-            "mos": self.mos[index],
+            "img_A": img_orig_tensor,  # 원본 이미지 텐서
+            "img_B": img_distorted_tensor,  # 왜곡된 이미지 텐서
+            "mos": self.mos[index],  # MOS 값
         }
 
 
+    def __len__(self):
+        return len(self.image_paths)
+ """
+
+import pandas as pd
+import numpy as np
+from PIL import Image, ImageFilter
+import torch
+from torch.utils.data import Dataset
+from torchvision import transforms
+import random
+from pathlib import Path
+from PIL.Image import Resampling
+
+distortion_groups = {
+    'blur': ["gaussian_blur", "lens_blur", "motion_blur"],
+    'color': ["color_diffusion", "color_shift", "color_quantization", "color_saturation_1", "color_saturation_2"],
+    'compression': ["jpeg2000", "jpeg"],
+    'noise': ["white_noise", "white_noise_color_component", "impulse_noise", "multiplicative_noise"],
+    'enhancement': ["denoise", "brighten", "darken"],
+    'shift': ["mean_shift", "jitter"],
+    'others': ["non_eccentricity_patch", "pixelate", "quantization", "color_block", "high_sharpen", "contrast_change"]
+}
+
+distortion_levels = {
+    'gaussian_blur': [0.5, 1.0, 1.5, 2.0, 2.5],
+    'color_diffusion': [0.05, 0.1, 0.2, 0.3, 0.4],
+    'jpeg': [0.1, 0.2, 0.3, 0.4, 0.5],
+    'white_noise': [5, 10, 15, 20, 25],
+    'pixelate': [5, 10, 15, 20, 25]
+}
+
+class SPAQDataset(Dataset):
+    def __init__(self, csv_path, image_dir, crop_size=224):
+        super().__init__()
+        self.csv_path = Path(csv_path)
+        self.image_dir = Path(image_dir)
+        self.crop_size = crop_size
+
+        # Load CSV data
+        data = pd.read_csv(self.csv_path)
+        self.image_paths = [self.image_dir / img_name for img_name in data["Image name"]]
+        self.mos = data["MOS"].values
+
+        # Filter valid image paths
+        self.image_paths = [img for img in self.image_paths if img.exists()]
+        if len(self.image_paths) == 0:
+            raise FileNotFoundError(f"No valid images found in {self.image_dir}")
+
+        # Transformations
+        self.transform = transforms.Compose([
+            transforms.Resize((self.crop_size, self.crop_size)),
+            transforms.RandomHorizontalFlip(),
+            transforms.ColorJitter(brightness=0.2, contrast=0.2, saturation=0.2, hue=0.1),
+            transforms.ToTensor()
+        ])
+
+    def apply_distortion(self, image, distortion, level):
+        if distortion == "gaussian_blur":
+            return image.filter(ImageFilter.GaussianBlur(level))
+        elif distortion == "color_diffusion":
+            image_array = np.array(image, dtype=np.float64)
+            
+            # 랜덤 노이즈 생성 (image_array와 동일한 shape)
+            noise = np.random.uniform(-level, level, image_array.shape)
+            
+            # 노이즈를 추가한 후 클리핑
+            diffused = np.clip(image_array + noise, 0, 255).astype(np.uint8)
+            
+            # 다시 PIL 이미지로 변환
+            return Image.fromarray(diffused)
+        elif distortion == "jpeg":
+            image = image.resize((image.width // 2, image.height // 2), Resampling.LANCZOS)  # ANTIALIAS -> Resampling.LANCZOS
+            return image.resize((image.width, image.height), Resampling.LANCZOS)  # 동일하게 수정
+        elif distortion == "white_noise":
+            noise = np.random.normal(0, level, (image.height, image.width, 3))
+            noisy_image = np.array(image) + noise
+            return Image.fromarray(np.clip(noisy_image, 0, 255).astype(np.uint8))
+        elif distortion == "pixelate":
+            small = image.resize((image.width // level, image.height // level), Resampling.NEAREST)
+            return small.resize((image.width, image.height), Resampling.NEAREST)
+        return image
+
+    def generate_hard_negatives(self, image):
+        small = image.resize((image.width // 2, image.height // 2), Resampling.LANCZOS)  # 동일하게 수정
+        return small.resize((image.width, image.height), Resampling.LANCZOS)  # 동일하게 수정
+
+    def apply_random_distortions(self, image, num_distortions=4):
+        distortions = []
+        for group in distortion_groups.values():
+            distortions.append(random.choice(group))
+        distortions = random.sample(distortions, num_distortions)
+        for distortion in distortions:
+            level = random.choice(distortion_levels.get(distortion, [1]))
+            image = self.apply_distortion(image, distortion, level)
+        return image
+
+    def __getitem__(self, index):
+        img_orig = Image.open(self.image_paths[index]).convert("RGB")
+        img_distorted = self.apply_random_distortions(img_orig)
+        hard_negative = self.generate_hard_negatives(img_orig)
+
+        img_orig_tensor = self.transform(img_orig)
+        img_distorted_tensor = self.transform(img_distorted)
+        hard_negative_tensor = self.transform(hard_negative)
+
+        return {
+            "img_A": img_orig_tensor,
+            "img_B": img_distorted_tensor,
+            "hard_neg": hard_negative_tensor,
+            "mos": torch.tensor(self.mos[index], dtype=torch.float32)
+        }
 
     def __len__(self):
         return len(self.image_paths)
